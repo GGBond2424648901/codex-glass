@@ -1,0 +1,2 @@
+# Optional native desktop UI; web dashboard remains dependency-free.
+PyQt5>=5.15,<6

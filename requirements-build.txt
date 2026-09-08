@@ -1,0 +1,4 @@
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.2
+PyQt5-sip==12.17.2
+pyinstaller==6.22.2

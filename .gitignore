@@ -1,0 +1,45 @@
+.DS_Store
+.idea/
+.vscode/
+
+__pycache__/
+.pycache/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.env
+.venv/
+venv/
+env/
+dist/
+build/
+
+*.log
+*.pid
+*.jsonl
+
+# Local outputs
+codex_monitor_summary.json
+monitor_config.json
+
+# Codex local state
+**/.codex/
+
+# Isolated feature worktrees
+.worktrees/
+work/
+outputs/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite3-*
+*.sqlite-*
+*.db-*
+*.zip
+*.exe
+*.prof
+auth.json
+credentials.json

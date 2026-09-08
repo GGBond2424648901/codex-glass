@@ -1,0 +1,17 @@
+{
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8081
+  },
+  "model_aliases": {
+    "gpt-5.4-codex": "gpt-5.4",
+    "gpt-5.4-codex-mini": "gpt-5.4-mini"
+  },
+  "pricing_per_million": {
+    "my-private-model": {
+      "input": 0.0,
+      "cached_input": 0.0,
+      "output": 0.0
+    }
+  }
+}
