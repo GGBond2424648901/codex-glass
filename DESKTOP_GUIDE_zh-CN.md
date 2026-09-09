@@ -1,8 +1,10 @@
-# Codex Glass 4.0 · 使用指南
+# Codex Glass 4.1 · 使用指南
 
 ## 启动
 
 运行 `CodexGlass.exe`；源码运行 `python desktop_widget.py`。复用已有 Conda 环境即可，桌面依赖见 requirements-desktop.txt。重复启动会恢复现有组件。
+
+4.1 仅整理内部源码结构，继续复用原有 SQLite；不用删除索引或重新导入。开发者可参考 [源码架构](docs/ARCHITECTURE.md)。
 
 默认连接本机 127.0.0.1:8081，服务不存在时自动启动后台。旧版服务已占用端口时，应先正常停止旧服务再升级，不同时运行两个索引后台。Windows EXE 无需安装 Python。
 

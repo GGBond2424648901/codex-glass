@@ -4,7 +4,7 @@
 
 Windows 原生悬浮组件与完整看板。展示模型 Token、美元费用估算及账号额度快照；支持跨电脑 SQLite 历史导入与自动去重。
 
-[下载 Windows EXE](https://github.com/GGBond2424648901/codex-glass/releases/latest) · [使用指南](DESKTOP_GUIDE_zh-CN.md) · [数据与隐私](PRIVACY.md) · [反馈问题](https://github.com/GGBond2424648901/codex-glass/issues)
+[下载 Windows EXE](https://github.com/GGBond2424648901/codex-glass/releases/latest) · [使用指南](DESKTOP_GUIDE_zh-CN.md) · [源码架构](docs/ARCHITECTURE.md) · [数据与隐私](PRIVACY.md) · [反馈问题](https://github.com/GGBond2424648901/codex-glass/issues)
 
 ![原生完整看板](docs/images/overview-today.png)
 
@@ -114,11 +114,14 @@ python monitor.py import-index --source-index "D:\history\old-computer.sqlite3"
 
 ## 开发与构建
 
+4.1 起实现代码归入 `codex_glass/`：核心计算、SQLite 存储、服务、桌面组件和命令行工具各有独立目录。根目录仅保留三个兼容启动入口；Web 页面从 Python 服务中提取为资源文件。详见 [源码结构与维护指南](docs/ARCHITECTURE.md)。此次整理不改变界面或数据库结构，无需重新导入历史。
+
 ```powershell
-python -m pip install -r requirements-desktop.txt
+python -m pip install -r requirements-desktop.txt -r requirements-dev.txt
+python -m black --check codex_glass tests monitor.py web_dashboard.py desktop_widget.py
 $env:QT_QPA_PLATFORM = 'windows'
 python -m unittest discover -s tests -v
-python -m pip install pyinstaller==6.22.2
+python -m pip install -r requirements-build.txt
 ./build_exe.ps1
 ```
 
@@ -131,6 +134,7 @@ python -m pip install pyinstaller==6.22.2
 - 动态光影、字体与 DPI 会造成差异，不宣称 AI 设计图与所有机器逐像素完全相同。
 - 不提供云同步、实际账单获取或跨账号身份识别。
 - 默认只监听本机，不上传记录。仓库 / Release 不含个人 SQLite、会话、日志、令牌或虚拟环境。不要把监控端口暴露到公网。
+- 原始设计稿与本地设计对照图不上传；文档配图是实际程序使用演示数据生成的界面截图。
 
 参见 [PRIVACY.md](PRIVACY.md) 与 [SECURITY.md](SECURITY.md)。
 

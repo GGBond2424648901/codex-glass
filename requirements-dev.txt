@@ -1,0 +1,2 @@
+# Development-only formatter. Runtime does not import Black.
+black==25.1.0
