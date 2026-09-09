@@ -5,6 +5,66 @@ from tests.test_core_aggregation import index_module
 
 
 class CompactHistoryTests(unittest.TestCase):
+    def test_repeated_history_prices_are_shared_without_changing_rows(self):
+        from codex_glass.storage.compact import CompactHistory
+
+        history = CompactHistory()
+        for i in range(20000):
+            history.append(
+                dict(
+                    timestamp="2026-09-08 12:00:00",
+                    model="same",
+                    cwd="work",
+                    pricing_source="direct",
+                    tokens={},
+                    cost_usd={"total": i / 1000000},
+                    rates_per_million={"input": 2.0 if i % 2 else 4.0, "cached_input": 0.2, "output": 8.0},
+                )
+            )
+        self.assertLess(history.storage_bytes, 20000 * 100)
+        self.assertEqual(4.0, history[0]["rates_per_million"]["input"])
+        self.assertEqual(2.0, history[-1]["rates_per_million"]["input"])
+        self.assertEqual(0.019999, history[-1]["cost_usd"]["total"])
+        self.assertEqual(20000, history.page(model="same")["total"])
+
+    def test_compact_sql_load_uses_bounded_columns(self):
+        import tempfile, tracemalloc
+        from pathlib import Path
+        from tests.helpers import sample_records, write_jsonl
+
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            sessions = root / "sessions"
+            write_jsonl(sessions / "one.jsonl", sample_records())
+            index = index_module.SessionIndex(root / "index.sqlite3")
+            index.initialize()
+            try:
+                config = MonitorConfig.load(root / "config.json")
+                index_module.SessionIndexer(index, config).scan_once(sessions)
+                with index.write_transaction() as connection:
+                    connection.executemany(
+                        """INSERT INTO usage_events
+                        (file_id,source_offset,occurred_at,model,cwd,input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens,total_tokens,pricing_source,created_at)
+                        SELECT file_id,?,occurred_at,model,cwd,input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens,total_tokens,pricing_source,created_at FROM usage_events WHERE event_id=1""",
+                        ((100000 + i,) for i in range(20000)),
+                    )
+                readings = []
+                tracemalloc.start()
+                try:
+                    result = index.build_summary(
+                        config,
+                        compact_events=True,
+                        progress=lambda phase, *_: (
+                            readings.append(tracemalloc.get_traced_memory()[0]) if phase == "quotas" else None
+                        ),
+                    )
+                    self.assertLess(readings[0], 3 * 1024 * 1024)
+                    self.assertEqual(20002, len(result["_history"]))
+                finally:
+                    tracemalloc.stop()
+            finally:
+                index.close()
+
     def test_long_context_history_cost_matches_aggregate_cost(self):
         event = index_module.UsageEvent(
             datetime(2026, 9, 8),

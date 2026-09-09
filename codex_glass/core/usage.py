@@ -724,12 +724,24 @@ def aggregate_usage_events(
     )
     five_hour_slot_minutes = 5
 
-    all_events: List[UsageEvent] = []
+    from codex_glass.storage.packed_events import PackedEvents
+    from heapq import heappush, heapreplace
+
+    all_events = PackedEvents() if event_sink is not None else []
+    raw_paths = set()
+    active_cwds = set()
+    first_chart_date = current_time.date()
     for position, event in enumerate(events):
         if progress is not None and position % 4096 == 0:
             progress("pricing", position, len(events) if hasattr(events, "__len__") else 0)
         if not _path_matches_filter(event.cwd, cwd_filter):
             continue
+        if isinstance(event.cwd, str) and event.cwd.strip():
+            raw_paths.add(event.cwd)
+        if event.timestamp <= current_time:
+            first_chart_date = min(first_chart_date, event.timestamp.date())
+            if event.timestamp >= five_hours_ago:
+                active_cwds.add(event.cwd or "unknown")
         estimated_cost_usd, pricing_source = estimate_cost_usd(event.model, event.delta, cfg)
         all_events.append(
             UsageEvent(
@@ -741,7 +753,10 @@ def aggregate_usage_events(
                 pricing_source=pricing_source,
             )
         )
-    all_events.sort(key=lambda e: e.timestamp)
+    if isinstance(all_events, PackedEvents):
+        all_events.sort()
+    else:
+        all_events.sort(key=lambda e: e.timestamp)
     ranked_rate_limit_snapshots: Dict[str, RateLimitSnapshot] = {}
     for snapshot in rate_limit_snapshots:
         rate_limit_key = snapshot.limit_id or "global"
@@ -750,7 +765,7 @@ def aggregate_usage_events(
             ranked_rate_limit_snapshots[rate_limit_key] = snapshot
 
     rate_limit_snapshots = ranked_rate_limit_snapshots
-    workspace_aliases = _build_workspace_aliases(all_events)
+    workspace_aliases = {path: _workspace_label(i + 1) for i, path in enumerate(sorted(raw_paths))}
 
     def empty_stats() -> Dict[str, Any]:
         return {
@@ -811,10 +826,7 @@ def aggregate_usage_events(
     five_hour_chart_tokens = [0] * len(five_hour_chart_times)
     today_chart_models: Dict[str, List[int]] = {}
     five_hour_chart_models: Dict[str, List[int]] = {}
-    eligible_dates = [event.timestamp.date() for event in all_events if event.timestamp <= current_time]
-    earliest_chart_date = (
-        max(min(eligible_dates), current_time.date() - timedelta(days=89)) if eligible_dates else current_time.date()
-    )
+    earliest_chart_date = max(first_chart_date, current_time.date() - timedelta(days=89))
     all_chart_dates = []
     chart_date = earliest_chart_date
     while chart_date <= current_time.date():
@@ -824,7 +836,13 @@ def aggregate_usage_events(
     all_chart_tokens = [0] * len(all_chart_dates)
     all_chart_models: Dict[str, List[int]] = {}
 
+    recent_heap = []
     for position, event in enumerate(all_events):
+        recent_item = (event.timestamp, -position, event)
+        if len(recent_heap) < 50:
+            heappush(recent_heap, recent_item)
+        elif recent_item[:2] > recent_heap[0][:2]:
+            heapreplace(recent_heap, recent_item)
         if progress is not None and position % 4096 == 0:
             progress("totals", position, len(all_events))
         delta = event.delta
@@ -950,7 +968,7 @@ def aggregate_usage_events(
             this_week_by_date[k] = empty_stats()
         d += timedelta(days=1)
 
-    recent_events = sorted(all_events, key=lambda e: e.timestamp, reverse=True)[:50]
+    recent_events = [item[2] for item in sorted(recent_heap, reverse=True)]
     recent_calls = [
         {
             "timestamp": e.timestamp.isoformat(sep=" ", timespec="seconds"),
@@ -1097,9 +1115,7 @@ def aggregate_usage_events(
     active_slots = sum(1 for st in five_hour_by_slot.values() if int(st.get("total_tokens", 0)) > 0)
     last_event = all_events[-1] if all_events else None
     five_hour_models_active = sum(1 for st in five_hour_by_model.values() if int(st.get("total_tokens", 0)) > 0)
-    five_hour_cwds_active = len(
-        {(event.cwd or "unknown") for event in all_events if five_hours_ago <= event.timestamp <= current_time}
-    )
+    five_hour_cwds_active = len(active_cwds)
 
     tokens_per_minute_5h = round(float(five_hour.get("total_tokens", 0)) / 300.0, 2)
     tokens_per_minute_15m = round(float(recent_15m.get("total_tokens", 0)) / 15.0, 2)

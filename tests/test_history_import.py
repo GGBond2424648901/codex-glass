@@ -70,6 +70,20 @@ class HistoryImportSchemaTests(unittest.TestCase):
 
 
 class HistoryImporterTests(unittest.TestCase):
+    def test_packed_summary_preserves_mixed_source_dedup_and_history(self):
+        from datetime import datetime
+
+        self.importer.import_database(self.make_source())
+        self.importer.import_database(self.make_source("second.sqlite3", source_offset=21, tokens=120))
+        self.add_matching_local_event()
+        config = MonitorConfig.load(self.root / "missing.json")
+        now = datetime(2026, 9, 9, 12)
+        expected = self.target.build_summary(config, include_events=True, now=now)
+        actual = self.target.build_summary(config, compact_events=True, now=now)
+        self.assertEqual(230, actual["total"]["total_tokens"])
+        self.assertEqual(expected.pop("events"), list(actual.pop("_history")))
+        self.assertEqual(expected, actual)
+
     SESSION_ID = "019eb98f-7ef0-7530-b0ea-8caa660869d0"
 
     def setUp(self):

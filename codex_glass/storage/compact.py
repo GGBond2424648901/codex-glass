@@ -28,7 +28,6 @@ class CompactHistory(Sequence):
         self.dimensions = []
         self.dimension_ids = {}
         self.tokens = [array("Q") for _ in TOKEN_KEYS]
-        self.rates = [array("d") for _ in RATE_KEYS]
         self.costs = [array("d") for _ in COST_KEYS]
 
     def __len__(self):
@@ -36,12 +35,15 @@ class CompactHistory(Sequence):
 
     @property
     def storage_bytes(self):
-        return sum(
-            a.buffer_info()[1] * a.itemsize for a in [self.times, self.ids] + self.tokens + self.rates + self.costs
+        return (
+            sum(a.buffer_info()[1] * a.itemsize for a in [self.times, self.ids] + self.tokens + self.costs)
+            + len(self.dimensions) * len(RATE_KEYS) * 8
         )
 
     def append(self, row):
-        dim = tuple(row.get(k, "") for k in ("model", "cwd", "pricing_source"))
+        dim = tuple(row.get(k, "") for k in ("model", "cwd", "pricing_source")) + (
+            tuple(row.get("rates_per_million", {}).get(k, 0) for k in RATE_KEYS),
+        )
         if dim not in self.dimension_ids:
             self.dimension_ids[dim] = len(self.dimensions)
             self.dimensions.append(dim)
@@ -49,7 +51,6 @@ class CompactHistory(Sequence):
         self.times.append(stamp(row["timestamp"]))
         for arrays, keys, name in (
             (self.tokens, TOKEN_KEYS, "tokens"),
-            (self.rates, RATE_KEYS, "rates_per_million"),
             (self.costs, COST_KEYS, "cost_usd"),
         ):
             for a, k in zip(arrays, keys):
@@ -58,14 +59,14 @@ class CompactHistory(Sequence):
     def __getitem__(self, i):
         if isinstance(i, slice):
             return [self[j] for j in range(*i.indices(len(self)))]
-        m, c, p = self.dimensions[self.ids[i]]
+        m, c, p, rates = self.dimensions[self.ids[i]]
         return {
             "timestamp": (EPOCH + timedelta(seconds=self.times[i])).isoformat(sep=" ", timespec="seconds"),
             "model": m,
             "cwd": c,
             "pricing_source": p,
             "tokens": {k: a[i] for k, a in zip(TOKEN_KEYS, self.tokens)},
-            "rates_per_million": {k: a[i] for k, a in zip(RATE_KEYS, self.rates)},
+            "rates_per_million": dict(zip(RATE_KEYS, rates)),
             "cost_usd": {k: a[i] for k, a in zip(COST_KEYS, self.costs)},
         }
 
@@ -92,7 +93,7 @@ class CompactHistory(Sequence):
         lo = stamp(since) if since else None
         hi = stamp(until) if until else None
         allowed = set()
-        for i, (m, c, p) in enumerate(self.dimensions):
+        for i, (m, c, p, rates) in enumerate(self.dimensions):
             m = m.lower()
             c = c.lower()
             if (

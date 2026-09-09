@@ -434,9 +434,13 @@ class SessionIndex:
             status = self._status_from_row(state_row)
             generation = int(state_row["generation"])
             key = hashlib.sha256(f"{config_key}:{generation}".encode()).hexdigest()
-            cached = reader.execute(
-                "SELECT payload_json, as_of FROM summary_cache WHERE cache_key=?", (key,)
-            ).fetchone()
+            cached = (
+                None
+                if compact_events
+                else reader.execute(
+                    "SELECT payload_json, as_of FROM summary_cache WHERE cache_key=?", (key,)
+                ).fetchone()
+            )
             if not compact_events and cached and cached["as_of"] == current_time.isoformat():
                 result = json.loads(cached["payload_json"])
                 result["index"] = status.to_payload()
@@ -476,18 +480,32 @@ class SessionIndex:
             from codex_glass.storage.history_import import rate_limit_key, session_key, usage_event_key
 
             event_rows = []
+            from codex_glass.storage.packed_events import PackedEvents
+
+            packed = PackedEvents() if compact_events else None
             local_event_keys = set()
             has_imported_events = reader.execute("SELECT 1 FROM imported_usage_events LIMIT 1").fetchone() is not None
             has_imported_rates = (
                 reader.execute("SELECT 1 FROM imported_rate_limit_snapshots LIMIT 1").fetchone() is not None
             )
+
+            def collect_event(record):
+                if packed is None:
+                    event_rows.append(record)
+                else:
+                    position = len(packed)
+                    packed.append(record[4])
+                    if has_imported_events:
+                        event_rows.append((*record[:4], position))
+
             for row in reader.execute(
                 """SELECT e.*, f.path AS session_path, f.head_hash AS session_head_hash
                      FROM usage_events e JOIN session_files f ON e.file_id=f.file_id
                    ORDER BY e.occurred_at, f.path COLLATE session_path, e.source_offset"""
             ):
-                if progress is not None and len(event_rows) % 4096 == 0:
-                    progress("reading", len(event_rows), 0)
+                count = len(packed) if packed is not None else len(event_rows)
+                if progress is not None and count % 4096 == 0:
+                    progress("reading", count, 0)
                 delta = UsageDelta(
                     *(
                         int(row[name])
@@ -515,7 +533,7 @@ class SessionIndex:
                         row["total_tokens"],
                     )
                     local_event_keys.add(stable_event)
-                event_rows.append(
+                collect_event(
                     (
                         datetime.fromisoformat(row["occurred_at"]),
                         0,
@@ -539,8 +557,9 @@ class SessionIndex:
                        ON f.source_id=e.source_id AND f.source_file_id=e.source_file_id
                     ORDER BY e.occurred_at, f.source_path, e.source_offset, e.source_id"""
             ):
-                if progress is not None and len(event_rows) % 4096 == 0:
-                    progress("reading", len(event_rows), 0)
+                count = len(packed) if packed is not None else len(event_rows)
+                if progress is not None and count % 4096 == 0:
+                    progress("reading", count, 0)
                 if row["event_key"] in local_event_keys or row["event_key"] in imported_event_keys:
                     continue
                 imported_event_keys.add(row["event_key"])
@@ -557,7 +576,7 @@ class SessionIndex:
                     )
                 )
                 occurred = datetime.fromisoformat(row["occurred_at"])
-                event_rows.append(
+                collect_event(
                     (
                         occurred,
                         1,
@@ -573,8 +592,16 @@ class SessionIndex:
                         ),
                     )
                 )
-            event_rows.sort(key=lambda item: (item[0], path_order[item[2]], item[1], item[3]))
-            events = [item[4] for item in event_rows]
+            if packed is not None and not has_imported_events:
+                packed.sort()
+                events = packed
+            else:
+                event_rows.sort(key=lambda item: (item[0], path_order[item[2]], item[1], item[3]))
+                if packed is None:
+                    events = [item[4] for item in event_rows]
+                else:
+                    packed.reorder([item[4] for item in event_rows])
+                    events = packed
             del event_rows, local_event_keys, imported_event_keys
 
             by_session: Dict[str, Dict[str, RateLimitSnapshot]] = {}
