@@ -3,7 +3,8 @@
 import argparse, ctypes, json, os, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
-from PyQt5.QtCore import Qt, QTimer, QUrl, QPoint, QRectF, QSettings, QVariantAnimation
+from PyQt5 import sip
+from PyQt5.QtCore import QEvent, Qt, QTimer, QUrl, QPoint, QRectF, QSettings, QVariantAnimation
 from PyQt5.QtGui import QPainter, QPen, QColor, QIcon, QPixmap, QFontMetrics
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QLocalServer, QLocalSocket
 from PyQt5.QtWidgets import (
@@ -42,6 +43,42 @@ def display_number(value):
     if text and text[-1] in "KMBT" and "." in text:
         return text[:-1].rstrip("0").rstrip(".") + text[-1]
     return text
+
+
+def _dispose_desktop(app, widget, window, socket=None, server=None, timer=None):
+    """Destroy native desktop roots while the QApplication event loop is alive."""
+    if timer is not None and not sip.isdeleted(timer):
+        timer.stop()
+        timer.deleteLater()
+    widget_alive = not sip.isdeleted(widget)
+    if widget_alive and not sip.isdeleted(widget.tray):
+        widget.tray.hide()
+
+    roots = []
+    dashboard = getattr(widget, "dashboard", None) if widget_alive else None
+    if dashboard is not None and not sip.isdeleted(dashboard):
+        dashboard_root = dashboard.host_window()
+        if not sip.isdeleted(dashboard_root):
+            roots.append(dashboard_root)
+    if not sip.isdeleted(window) and all(root is not window for root in roots):
+        roots.append(window)
+    for root in roots:
+        root.hide()
+        root.deleteLater()
+
+    if socket is not None and not sip.isdeleted(socket):
+        socket.abort()
+        socket.deleteLater()
+    if server is not None and not sip.isdeleted(server):
+        server.close()
+        server.deleteLater()
+
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    for top_level in app.topLevelWidgets():
+        if not sip.isdeleted(top_level):
+            top_level.hide()
+            top_level.deleteLater()
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def app_icon():
@@ -790,7 +827,9 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    socket = None
     server = None
+    timer = None
     if not args.capture:
         socket = QLocalSocket()
         socket.connectToServer("codex-glass-frosted-v3")
@@ -822,6 +861,8 @@ def main():
             widget.restore()
 
         server.newConnection.connect(restore)
+
+    app.aboutToQuit.connect(lambda: _dispose_desktop(app, widget, window, socket, server, timer))
     window.show()
     if args.capture:
         deadline = time.time() + 180

@@ -2,6 +2,7 @@
 
 import math
 
+from PyQt5 import sip
 from PyQt5.QtCore import QEasingCurve, QPoint, QPointF, QRectF, Qt, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QWidget
@@ -192,7 +193,8 @@ class GlassChart(QWidget):
 
     def hideEvent(self, event):
         self.pulse.stop()
-        self.info_popup.hide()
+        if not sip.isdeleted(self.info_popup):
+            self.info_popup.hide()
         super().hideEvent(event)
 
     def showEvent(self, event):
@@ -393,7 +395,8 @@ class GlassChart(QWidget):
 
     def leaveEvent(self, event):
         self.hover_index = None
-        self.info_popup.hide()
+        if not sip.isdeleted(self.info_popup):
+            self.info_popup.hide()
         self.update()
 
     def wheelEvent(self, event):

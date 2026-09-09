@@ -1,5 +1,9 @@
 import os
+import subprocess
+import sys
+import textwrap
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -64,6 +68,74 @@ class GlassChartZoomTests(unittest.TestCase):
         self.wheel(self.chart, 250, 100, -120)
         self.assertAlmostEqual(0.0, self.chart.view_range[0], places=5)
         self.assertAlmostEqual(9.0, self.chart.view_range[1], places=5)
+
+    def test_hiding_chart_after_qt_deletes_tooltip_does_not_abort(self):
+        code = textwrap.dedent(
+            """
+            from PyQt5 import sip
+            from PyQt5.QtCore import QEvent, Qt
+            from PyQt5.QtWidgets import QApplication
+            from codex_glass.desktop.components.chart import GlassChart
+
+            app = QApplication([])
+            app.setQuitOnLastWindowClosed(False)
+            chart = GlassChart()
+            chart.setAttribute(Qt.WA_DontShowOnScreen)
+            chart.show()
+            app.processEvents()
+            chart.info_popup.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            assert sip.isdeleted(chart.info_popup)
+            chart.hide()
+            app.processEvents()
+            """
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        environment["QT_QPA_PLATFORM"] = "windows"
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_leaving_chart_after_qt_deletes_tooltip_does_not_abort(self):
+        code = textwrap.dedent(
+            """
+            from PyQt5 import sip
+            from PyQt5.QtCore import QEvent, Qt
+            from PyQt5.QtWidgets import QApplication
+            from codex_glass.desktop.components.chart import GlassChart
+
+            app = QApplication([])
+            app.setQuitOnLastWindowClosed(False)
+            chart = GlassChart()
+            chart.setAttribute(Qt.WA_DontShowOnScreen)
+            chart.show()
+            app.processEvents()
+            chart.info_popup.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            assert sip.isdeleted(chart.info_popup)
+            QApplication.sendEvent(chart, QEvent(QEvent.Leave))
+            app.processEvents()
+            """
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        environment["QT_QPA_PLATFORM"] = "windows"
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_anchor_bounds_minimum_span_and_reset(self):
         self.chart.zoom_at(0.0, 20)
