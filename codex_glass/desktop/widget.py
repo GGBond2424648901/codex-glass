@@ -960,8 +960,8 @@ def main():
     if not args.capture:
         from codex_glass.desktop.components.host import ScaledSurfaceHost
 
-        saved_scale = widget.settings.value("scale", 1.0, type=float) if widget.persist else 1.0
-        window = ScaledSurfaceHost(widget, scale=saved_scale, min_scale=0.7, max_scale=1.5)
+        saved_scale = widget.settings.value("scale", 0.85, type=float) if widget.persist else 0.85
+        window = ScaledSurfaceHost(widget, scale=saved_scale, min_scale=0.55, max_scale=1.5)
         window.scaleChanged.connect(lambda value: widget.save_settings())
     if server:
 
@@ -976,6 +976,8 @@ def main():
 
     app.aboutToQuit.connect(lambda: _dispose_desktop(app, widget, window, socket, server, timer))
     window.show()
+    if window is not widget and window.windowHandle():
+        window.windowHandle().screenChanged.connect(lambda screen: window.clamp_to_screen())
     if args.capture:
         deadline = time.time() + 180
 

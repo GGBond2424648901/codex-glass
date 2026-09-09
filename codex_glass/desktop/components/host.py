@@ -1,7 +1,7 @@
 """Transparent proportional host for live canonical-size Qt surfaces."""
 
 from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QPainter, QPalette, QTransform
+from PyQt5.QtGui import QColor, QCursor, QPainter, QPalette, QTransform, QPen
 from PyQt5.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
 
 
@@ -13,7 +13,7 @@ class ScaledSurfaceHost(QGraphicsView):
     """
 
     scaleChanged = pyqtSignal(float)
-    EDGE_MARGIN = 8
+    EDGE_MARGIN = 12
 
     def __init__(self, surface, scale=1.0, min_scale=0.7, max_scale=1.5):
         initial_position = surface.pos()
@@ -29,6 +29,7 @@ class ScaledSurfaceHost(QGraphicsView):
         self.scale = self._clamp(scale)
         self._resize_edges = ""
         self._resize_start_geometry = None
+        self._resize_start_pointer = None
         self._syncing_visibility = False
 
         self.setWindowFlags(flags | Qt.FramelessWindowHint)
@@ -102,6 +103,13 @@ class ScaledSurfaceHost(QGraphicsView):
         if screen is None:
             return
         area = screen.availableGeometry()
+        self.fit_to_area(area)
+
+    def fit_to_area(self, area):
+        """Fit Qt logical work-area coordinates (already adjusted for DPI)."""
+        fit = min((area.width() - 24) / self.surface.width(), (area.height() - 24) / self.surface.height())
+        if self.scale > fit:
+            self.set_scale(max(self.min_scale, fit))
         max_x = max(area.left(), area.right() - self.width() + 1)
         max_y = max(area.top(), area.bottom() - self.height() + 1)
         self.move(
@@ -110,6 +118,8 @@ class ScaledSurfaceHost(QGraphicsView):
         )
 
     def _edges_at(self, point):
+        if self._grip_rect().contains(QPointF(point)):
+            return "es"
         margin = self.EDGE_MARGIN
         edges = ""
         if point.x() < margin:
@@ -121,6 +131,20 @@ class ScaledSurfaceHost(QGraphicsView):
         elif point.y() >= self.height() - margin:
             edges += "s"
         return edges
+
+    def _grip_rect(self):
+        return QRectF(self.width() - 40, self.height() - 20, 28, 16)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(70, 108, 158, 180), 2.0, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(pen)
+        # Draw inside the rounded surface, at viewport scale for easy discovery.
+        x, y = self.width() - 24, self.height() - 10
+        painter.drawLine(x - 8, y, x, y - 8)
+        painter.drawLine(x - 3, y, x, y - 3)
 
     @staticmethod
     def _cursor_for(edges):
@@ -140,6 +164,7 @@ class ScaledSurfaceHost(QGraphicsView):
             if edges:
                 self._resize_edges = edges
                 self._resize_start_geometry = self.geometry()
+                self._resize_start_pointer = event.globalPos()
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -155,8 +180,9 @@ class ScaledSurfaceHost(QGraphicsView):
         boundary_top = geometry.y()
         boundary_right = geometry.x() + geometry.width()
         boundary_bottom = geometry.y() + geometry.height()
-        x = global_position.x()
-        y = global_position.y()
+        delta = global_position - self._resize_start_pointer
+        x = (boundary_left if "w" in edges else boundary_right) + delta.x()
+        y = (boundary_top if "n" in edges else boundary_bottom) + delta.y()
         if len(edges) == 1:
             if edges == "e":
                 return (x - boundary_left) / base_width
@@ -183,6 +209,10 @@ class ScaledSurfaceHost(QGraphicsView):
             return
         edges = self._edges_at(event.pos())
         self.viewport().setCursor(QCursor(self._cursor_for(edges)))
+        self.viewport().setToolTip(f"拖动调整大小 · {self.scale:.0%}（自动记忆）" if edges else "")
+        if edges:
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -190,6 +220,7 @@ class ScaledSurfaceHost(QGraphicsView):
             self._apply_resize(event.globalPos())
             self._resize_edges = ""
             self._resize_start_geometry = None
+            self._resize_start_pointer = None
             self.viewport().unsetCursor()
             event.accept()
             return

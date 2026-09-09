@@ -94,6 +94,20 @@ class GlassHostTests(unittest.TestCase):
         self.assertEqual(1, len(changed))
         self.assertIsInstance(changed[0][0], float)
 
+    def test_fit_small_logical_screen_preserves_readable_window_inside_work_area(self):
+        from PyQt5.QtCore import QRect
+
+        surface = QWidget()
+        surface.setFixedSize(440, 686)
+        _, host = self.make_host(surface, scale=1.0, min_scale=0.55)
+        self.assertTrue(callable(getattr(host, "fit_to_area", None)))
+        host.fit_to_area(QRect(0, 0, 800, 500))
+        self.assertLessEqual(host.height(), 476)
+        self.assertGreaterEqual(host.scale, 0.55)
+        self.assertLess(host.scale, 0.7)
+        self.assertGreaterEqual(host.x(), 0)
+        self.assertLessEqual(host.geometry().bottom(), 499)
+
     def test_east_edge_drag_scales_content_without_distorting_ratio(self):
         surface, host = self.make_host(scale=1.0)
         viewport = host.viewport()
@@ -107,6 +121,33 @@ class GlassHostTests(unittest.TestCase):
         self.assertLess(host.width(), 200)
         self.assertAlmostEqual(2.0, host.width() / host.height(), places=1)
         self.assertAlmostEqual(host.width() / 200.0, host.scale, places=2)
+
+    def test_inset_corner_grip_starts_resize_and_drag_changes_scale(self):
+        surface, host = self.make_host(scale=1.0)
+        point = QPoint(host.width() - 25, host.height() - 14)
+        QTest.mousePress(host.viewport(), Qt.LeftButton, pos=point)
+        self.assertEqual("es", host._resize_edges)
+        QTest.mouseRelease(host.viewport(), Qt.LeftButton, pos=point - QPoint(20, 10))
+        self.assertAlmostEqual(0.9, host.scale, places=2)
+
+    def test_press_release_without_motion_does_not_resize(self):
+        surface, host = self.make_host(scale=1.0)
+        point = QPoint(host.width() - 5, host.height() // 2)
+        QTest.mousePress(host.viewport(), Qt.LeftButton, pos=point)
+        QTest.mouseRelease(host.viewport(), Qt.LeftButton, pos=point)
+        self.assertAlmostEqual(1.0, host.scale)
+
+    def test_resize_cursor_and_hint_are_available_inside_wider_edge(self):
+        from PyQt5.QtCore import QEvent, QPointF
+        from PyQt5.QtGui import QMouseEvent
+
+        surface, host = self.make_host(scale=1.0)
+        point = QPoint(host.width() - 11, host.height() // 2)
+        # A hidden Windows viewport cannot receive OS cursor movement.
+        event = QMouseEvent(QEvent.MouseMove, QPointF(point), Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        QApplication.sendEvent(host.viewport(), event)
+        self.assertEqual(Qt.SizeHorCursor, host.viewport().cursor().shape())
+        self.assertIn("拖动", host.viewport().toolTip())
 
     def test_north_west_corner_drag_preserves_opposite_corner(self):
         surface, host = self.make_host(scale=1.0)
@@ -213,6 +254,14 @@ class GlassWidgetHostIntegrationTests(unittest.TestCase):
         QTest.mouseClick(self.widget.expand, Qt.LeftButton)
         self.assertFalse(self.widget.compact_mode)
         self.assertEqual(round(686 * 0.8), self.host.height())
+
+    def test_minimum_size_grip_does_not_swallow_collapse_button(self):
+        self.host.min_scale = 0.55
+        self.host.set_scale(0.55)
+        centre = self.widget.collapse.mapTo(self.widget, self.widget.collapse.rect().center())
+        point = self.host.mapFromScene(centre.x(), centre.y())
+        QTest.mouseClick(self.host.viewport(), Qt.LeftButton, pos=point)
+        self.assertTrue(self.widget.compact_mode)
 
     def test_expand_from_screen_bottom_clamps_full_host_inside_screen(self):
         QTest.mouseClick(self.widget.collapse, Qt.LeftButton)
