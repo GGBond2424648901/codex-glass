@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, TypeVar
 
+from codex_glass.storage.file_identity import file_identity
+
 from codex_glass.core.usage import (
     MonitorConfig,
     PRICING_POLICY_CHECKED_ON,
@@ -1148,11 +1150,12 @@ class SessionIndexer:
             head_hash = hashlib.sha256(head).hexdigest()
             # For a short growing file compare only bytes covered by the old hash.
             old_prefix_hash = hashlib.sha256(head[: min(state.size, 4096)]).hexdigest()
-            identity = self._file_identity(stat)
+            identity = file_identity(stat, stream)
+            native_identity = self._file_identity(stat)
             reset = (
                 stat.st_size < state.size
                 or (state.head_hash and old_prefix_hash != state.head_hash)
-                or (state.file_identity and identity and state.file_identity != identity)
+                or (state.file_identity and identity and state.file_identity not in (identity, native_identity))
                 or (state.head_hash and stat.st_size == state.size and stat.st_mtime_ns != state.mtime_ns)
             )
             parser = (
@@ -1177,11 +1180,11 @@ class SessionIndexer:
                     connection.execute("DELETE FROM usage_events WHERE file_id=?", (state.file_id,))
                     connection.execute("DELETE FROM rate_limit_snapshots WHERE file_id=?", (state.file_id,))
                     connection.execute("DELETE FROM quota_cache WHERE file_id=?", (state.file_id,))
-                    self._save_cursor(connection, state.file_id, stat, head_hash, 0, parser, None)
+                    self._save_cursor(connection, state.file_id, stat, head_hash, 0, parser, None, identity)
             if not changed:
                 error = None if state.read_failed else state.error
                 with self._write_transaction() as connection:
-                    self._save_cursor(connection, state.file_id, stat, head_hash, offset, parser, error)
+                    self._save_cursor(connection, state.file_id, stat, head_hash, offset, parser, error, identity)
                 return False, error
 
             last_checkpoint = time.monotonic()
@@ -1230,7 +1233,7 @@ class SessionIndexer:
                             quota,
                         )
                     self._save_cursor(
-                        connection, state.file_id, stat, head_hash, reader.completed_offset, parser, error
+                        connection, state.file_id, stat, head_hash, reader.completed_offset, parser, error, identity
                     )
                 events.clear()
                 snapshots.clear()
@@ -1271,7 +1274,7 @@ class SessionIndexer:
         return f"{stat.st_dev}:{stat.st_ino}" if stat.st_ino else ""
 
     @staticmethod
-    def _save_cursor(connection, file_id, stat, head_hash, offset, parser, error):
+    def _save_cursor(connection, file_id, stat, head_hash, offset, parser, error, identity):
         previous = parser.previous
         now = time.time()
         connection.execute(
@@ -1294,7 +1297,7 @@ class SessionIndexer:
                 error,
                 now,
                 now,
-                SessionIndexer._file_identity(stat),
+                identity,
                 file_id,
             ),
         )
@@ -1565,6 +1568,7 @@ class IndexCoordinator:
         self._lease_ttl = _LEASE_TTL_SECONDS
         self._renew_at = 0.0
         self._scan_generation: Optional[int] = None
+        self._summary_rejections = 0
         self._bootstrapped = False
         self._rebuild_pending = rebuild_index
         self._last_aggregate_key = None
@@ -1741,6 +1745,39 @@ class IndexCoordinator:
             pass  # Even a failed database remains observable through snapshot().
         self._publish(status)
 
+    @contextmanager
+    def _protect_summary(self, enabled):
+        """After contention, keep cooperating scanners out until publication.
+
+        A dedicated renewal thread covers long quota reads and serialization,
+        where aggregation progress callbacks may not run for an entire TTL.
+        """
+        if not enabled:
+            yield
+            return
+        done = threading.Event()
+        errors = []
+
+        def renew():
+            while not done.wait(self._lease_ttl / 3):
+                try:
+                    if not self.index.renew_lease(self._owner, self._lease_ttl):
+                        raise LostLeaseError("Summary indexing lease was lost")
+                except Exception as error:
+                    errors.append(error)
+                    return
+
+        heartbeat = threading.Thread(target=renew, name="summary-lease", daemon=True)
+        heartbeat.start()
+        try:
+            yield
+            if errors:
+                raise errors[0]
+        finally:
+            done.set()
+            heartbeat.join()
+            self.index.release_lease(self._owner)
+
     def _run(self) -> None:
         self._lease_ttl = max(_LEASE_TTL_SECONDS, math.ceil(self.interval * 3))
         try:
@@ -1777,7 +1814,8 @@ class IndexCoordinator:
                     # Exclusive ownership protects raw indexing. Committed SQL
                     # reads and generation-guarded cache/publication remain safe
                     # without it, even if aggregation or JSON takes minutes.
-                    if not self.index.release_lease(self._owner):
+                    protect_summary = self._summary_rejections > 0
+                    if not protect_summary and not self.index.release_lease(self._owner):
                         raise RuntimeError("Indexing lease lost before summary generation")
                     # No new facts or prices: a minute clock tick is sufficient
                     # for rolling windows. Explicit refresh always recomputes.
@@ -1789,22 +1827,27 @@ class IndexCoordinator:
                     forced = self._force_summary
                     self._force_summary = False
                     if aggregate_key == self._last_aggregate_key and not forced:
+                        if protect_summary:
+                            self.index.release_lease(self._owner)
                         self._publish(status)
                         continue
                     aggregating = replace(status, status="aggregating", complete=False)
                     self._aggregation_started = time.monotonic()
                     self._publish(aggregating)
-                    summary = self.index.build_summary(
-                        config,
-                        cwd_filter=self.cwd_filter,
-                        compact_events=True,
-                        summary_ready=lambda result: self._publish_summary(aggregating, result),
-                        progress=self._report_aggregation,
-                    )
-                    if not self._publish_summary(status, summary):
-                        self.request_refresh()
-                    else:
-                        self._last_aggregate_key = aggregate_key
+                    with self._protect_summary(protect_summary):
+                        summary = self.index.build_summary(
+                            config,
+                            cwd_filter=self.cwd_filter,
+                            compact_events=True,
+                            summary_ready=lambda result: self._publish_summary(aggregating, result),
+                            progress=self._report_aggregation,
+                        )
+                        if not self._publish_summary(status, summary):
+                            self._summary_rejections += 1
+                            self.request_refresh()
+                        else:
+                            self._summary_rejections = 0
+                            self._last_aggregate_key = aggregate_key
                 except _StopIndexing:
                     break
                 except Exception as error:

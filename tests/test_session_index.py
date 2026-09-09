@@ -72,6 +72,64 @@ class RelevantLineReaderTests(unittest.TestCase):
 
 
 class SessionIndexerTests(unittest.TestCase):
+    @unittest.skipUnless(index_module.os.name == "nt", "Windows runtime migration")
+    def test_modern_identity_migrates_without_deleting_events(self):
+        write_jsonl(self.log, sample_records())
+        self.indexer.scan_once(self.sessions)
+        stat = self.log.stat()
+        with self.index.write_transaction() as connection:
+            connection.execute("UPDATE session_files SET file_identity=?", (f"{stat.st_dev}:{stat.st_ino}",))
+            generation = connection.execute("SELECT generation FROM index_state").fetchone()[0]
+        for _ in range(3):
+            self.indexer.scan_once(self.sessions)
+        with self.index.read_transaction() as connection:
+            self.assertEqual(generation, connection.execute("SELECT generation FROM index_state").fetchone()[0])
+        self.assertEqual(2, len(self.index.load_events()))
+
+    def test_same_content_replacement_still_resets_file_identity(self):
+        write_jsonl(self.log, sample_records())
+        self.indexer.scan_once(self.sessions)
+        stat = self.log.stat()
+        replacement = self.sessions / "replacement.tmp"
+        replacement.write_bytes(self.log.read_bytes())
+        index_module.os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        with self.index.read_transaction() as connection:
+            generation = connection.execute("SELECT generation FROM index_state").fetchone()[0]
+        replacement.replace(self.log)
+        self.indexer.scan_once(self.sessions)
+        with self.index.read_transaction() as connection:
+            self.assertGreater(connection.execute("SELECT generation FROM index_state").fetchone()[0], generation)
+        self.assertEqual(2, len(self.index.load_events()))
+
+    def test_identity_read_failure_preserves_existing_facts(self):
+        write_jsonl(self.log, sample_records())
+        self.indexer.scan_once(self.sessions)
+        with mock.patch.object(index_module, "file_identity", side_effect=OSError("identity unavailable")):
+            status = self.indexer.scan_once(self.sessions)
+        self.assertEqual(1, status.failed_files)
+        self.assertEqual(195, sum(event["total_tokens"] for event in self.index.load_events()))
+
+    @unittest.skipUnless(index_module.os.name == "nt", "Windows runtime migration")
+    def test_runtime_device_width_change_does_not_reindex_unchanged_file(self):
+        path = self.sessions / "runtime.jsonl"
+        write_jsonl(path, sample_records())
+        self.indexer.scan_once(self.sessions)
+        with self.index.read_transaction() as connection:
+            generation = connection.execute("SELECT generation FROM index_state").fetchone()[0]
+        original = index_module.os.fstat
+
+        def different_runtime(fd):
+            stat = original(fd)
+            fields = {name: getattr(stat, name) for name in dir(stat) if name.startswith("st_")}
+            fields["st_dev"] = stat.st_dev & 0xFFFFFFFF
+            return SimpleNamespace(**fields)
+
+        with mock.patch.object(index_module.os, "fstat", different_runtime):
+            self.indexer.scan_once(self.sessions)
+        with self.index.read_transaction() as connection:
+            self.assertEqual(generation, connection.execute("SELECT generation FROM index_state").fetchone()[0])
+        self.assertEqual(195, sum(event["total_tokens"] for event in self.index.load_events()))
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -544,6 +602,44 @@ class SessionIndexSchemaTests(unittest.TestCase):
 
 
 class IndexCoordinatorTests(unittest.TestCase):
+    def test_protected_summary_renews_and_releases_lease_after_error(self):
+        coordinator = self.coordinator()
+        coordinator._lease_ttl = 1
+        self.assertTrue(self.index.acquire_lease(coordinator._owner, 1))
+        with self.assertRaisesRegex(RuntimeError, "aggregation failed"):
+            with coordinator._protect_summary(True):
+                time.sleep(1.3)
+                self.assertFalse(self.index.acquire_lease("competitor", 1))
+                raise RuntimeError("aggregation failed")
+        self.assertTrue(self.index.acquire_lease("competitor", 1))
+        self.index.release_lease("competitor")
+
+    def test_rejected_summary_retry_excludes_competing_indexer(self):
+        coordinator = self.coordinator()
+        original = self.index.build_summary
+        attempts = []
+
+        def competing_summary(*args, **kwargs):
+            acquired = self.index.acquire_lease("competitor", 60)
+            attempts.append(acquired)
+            result = original(*args, **kwargs)
+            if acquired:
+                try:
+                    with self.index.write_transaction() as connection:
+                        connection.execute("UPDATE index_state SET generation=generation+1")
+                finally:
+                    self.index.release_lease("competitor")
+            return result
+
+        with mock.patch.object(self.index, "build_summary", competing_summary):
+            coordinator.start()
+            try:
+                ready = self.wait_status(coordinator, "ready")
+            finally:
+                coordinator.stop()
+        self.assertEqual([True, False], attempts)
+        self.assertEqual(195, ready["total"]["total_tokens"])
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
