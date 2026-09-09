@@ -23,6 +23,7 @@ class GlassChart(QWidget):
         self.display_values = []
         self.start_values = []
         self.unit = "Token / min"
+        self.empty_text = "等待用量记录"
         self.motion = True
         self.live = False
         self.phase = 0
@@ -371,8 +372,8 @@ class GlassChart(QWidget):
                     x = rect.left() if j == 0 else (rect.right() - width if j == 2 else rect.center().x() - width / 2)
                     align = Qt.AlignLeft if j == 0 else (Qt.AlignRight if j == 2 else Qt.AlignHCenter)
                     p.drawText(QRectF(x, rect.bottom() + 5, width, 19), align | Qt.AlignVCenter, text)
-            else:
-                p.drawText(QRectF(0, rect.center().y() - 10, self.width(), 20), Qt.AlignCenter, "等待用量记录")
+            if not self.labels or not any(self.target_values):
+                p.drawText(QRectF(0, rect.center().y() - 24, self.width(), 48), Qt.AlignCenter, self.empty_text)
 
     def mouseMoveEvent(self, event):
         if not self.target_values or self.mini:

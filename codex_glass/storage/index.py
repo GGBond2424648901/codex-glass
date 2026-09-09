@@ -27,6 +27,7 @@ from codex_glass.core.usage import (
     UsageEvent,
     aggregate_usage_events,
     estimate_cost_usd,
+    default_codex_home,
     iter_session_files,
     parse_timestamp_local,
     _rate_limit_scope,
@@ -231,7 +232,7 @@ def summary_cache_key(config: MonitorConfig, cwd_filter: Optional[str], include_
 
 def default_index_path() -> Path:
     """Return the stable per-user location for the session index."""
-    return Path.home() / ".codex" / "codex-monitor.sqlite3"
+    return default_codex_home() / "codex-monitor.sqlite3"
 
 
 class SessionIndex:

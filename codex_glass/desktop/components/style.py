@@ -97,6 +97,13 @@ class IconButton(QPushButton):
             for x in (7, 14, 21):
                 p.drawEllipse(QPointF(x, 14), 1.5, 1.5)
         elif self.kind == "pin":
+            p.setBrush(Qt.NoBrush)
+            if self.isChecked():
+                p.translate(14, 14)
+                p.rotate(-28)
+                p.translate(-14, -14)
+                p.setPen(QPen(QColor("#163963"), 2.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.setBrush(QColor("#163963"))
             path = QPainterPath()
             path.moveTo(10, 6)
             path.lineTo(18, 6)

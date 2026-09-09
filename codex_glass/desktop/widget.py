@@ -1,6 +1,6 @@
 """Native Frosted Glass presentation: real Qt controls, vector charts and SQLite API."""
 
-import argparse, ctypes, json, os, subprocess, sys, time
+import argparse, ctypes, json, os, socket as net_socket, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 from PyQt5 import sip
@@ -221,6 +221,7 @@ class GlassWidget(QWidget):
         self.pin.move(343, 17)
         self.pin.setCheckable(True)
         self.pin.setChecked(True)
+        self.pin.setToolTip("已置顶 · 点击取消置顶")
         self.more = IconButton("more", "外观与菜单", self)
         self.more.move(386, 17)
         self.more.clicked.connect(self.show_menu)
@@ -314,6 +315,7 @@ class GlassWidget(QWidget):
         self.motion_action.setChecked(True)
         self.motion_action.toggled.connect(self.set_motion)
         self.menu.addAction("立即检查数据", self.retry_backend)
+        self.menu.addAction("复制数据诊断", lambda: QApplication.clipboard().setText(self.data_diagnostics()))
         self.menu.addAction("打开完整看板", self.open_dashboard)
         self.menu.addSeparator()
         self.menu.addAction("退出", self.quit_widget)
@@ -562,9 +564,24 @@ class GlassWidget(QWidget):
             age = (datetime.now(moment.tzinfo) - moment).total_seconds()
         except (ValueError, TypeError):
             age = 999
-        fresh = self.connected and age < 180
+        index = self.data.get("index", {})
+        status = index.get("status")
+        fresh = self.connected and age < 180 and status in (None, "ready") and not index.get("last_error")
         self.dot.setStyleSheet("color:" + (MINT if fresh else "#d79c62") + ";")
         self.dot.setToolTip(("已同步" if fresh else "离线或数据较旧") + f"\n{stamp}\n每5秒检查；索引汇总可能延迟")
+        if not self.connected:
+            message = "正在连接本机数据…" if self.backend_attempts < 3 else "后台未连接\n菜单 → 立即检查数据"
+        elif status == "error" or index.get("last_error"):
+            message = "索引失败 · 查看状态提示"
+            self.dot.setToolTip("索引失败\n" + str(index.get("last_error") or "请检查目录和权限"))
+        elif status in ("starting", "indexing", "discovering"):
+            message = "正在扫描本机会话…"
+        elif not self.data.get("total", {}).get("total_tokens"):
+            message = "未发现用量记录\n请确认本机已使用 Codex"
+        else:
+            message = "当前时段暂无用量 · 可切换累计"
+        self.chart.empty_text = message
+        self.chart.update()
         self.chart.set_live(fresh)
         self.tray.setToolTip(f"Codex Glass · {self.cost.text()} · {self.tokens.text()} Token")
 
@@ -619,6 +636,8 @@ class GlassWidget(QWidget):
     def toggle_top(self, checked):
         self.pin.blockSignals(True)
         self.pin.setChecked(checked)
+        self.pin.setToolTip("已置顶 · 点击取消置顶" if checked else "未置顶 · 点击始终置顶")
+        self.pin.setAccessibleName(self.pin.toolTip())
         self.pin.blockSignals(False)
         host = self.host_window()
         host.setWindowFlag(Qt.WindowStaysOnTopHint, checked)
@@ -745,7 +764,13 @@ class GlassWidget(QWidget):
         return open_dashboard(self)
 
     def launch_backend(self):
-        if not self.start_backend or self.url != "http://127.0.0.1:8081":
+        endpoint = QUrl(self.url)
+        if (
+            not self.start_backend
+            or endpoint.scheme() != "http"
+            or endpoint.host() not in ("127.0.0.1", "localhost")
+            or endpoint.path() not in ("", "/")
+        ):
             return
         if self.backend_process is not None and self.backend_process.poll() is None:
             return
@@ -754,6 +779,24 @@ class GlassWidget(QWidget):
         self.backend_attempts += 1
         self.backend_next_attempt = time.monotonic() + 30
         try:
+            port = endpoint.port(80)
+            # A service returning non-telemetry may own the requested port.
+            # Do not terminate it; give our own backend another loopback port.
+            with net_socket.socket() as probe:
+                if sys.platform == "win32":
+                    probe.setsockopt(net_socket.SOL_SOCKET, net_socket.SO_EXCLUSIVEADDRUSE, 1)
+                try:
+                    probe.bind(("127.0.0.1", port))
+                except OSError:
+                    probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            self.url = f"http://127.0.0.1:{port}"
+            dashboard = getattr(self, "dashboard", None)
+            if dashboard is not None and not sip.isdeleted(dashboard):
+                dashboard.url = self.url
+                dashboard.context = {}
+                dashboard.can_import = False
+                dashboard.enable_import(False)
             runtime = Path(os.environ.get("LOCALAPPDATA", str(Path.cwd()))) / "CodexGlass"
             runtime.mkdir(parents=True, exist_ok=True)
             command = (
@@ -761,6 +804,8 @@ class GlassWidget(QWidget):
                 if getattr(sys, "frozen", False)
                 else [sys.executable, str(resource_path("web_dashboard.py")), "--no-browser"]
             )
+            # CLI web preferences must not override the desktop endpoint.
+            command += ["--host", "127.0.0.1", "--port", str(port)]
             with (runtime / "backend.log").open("a", encoding="utf-8") as log:
                 self.backend_process = subprocess.Popen(
                     command,
@@ -777,6 +822,30 @@ class GlassWidget(QWidget):
         self.backend_attempts = 0
         self.backend_next_attempt = 0
         self.fetch()
+
+    def data_diagnostics(self):
+        from codex_glass.core.usage import default_codex_sessions_dir
+        from codex_glass.storage.index import default_index_path
+
+        directory = default_codex_sessions_dir()
+        index = self.data.get("index", {})
+        source = self.data.get("source", {})
+        runtime = Path(os.environ.get("LOCALAPPDATA", str(Path.cwd()))) / "CodexGlass"
+        return "\n".join(
+            [
+                "Codex Glass 数据诊断（含本机路径，不含聊天和令牌）",
+                f"后台地址：{self.url}",
+                f"连接：{'成功' if self.connected else '未连接'}；启动尝试：{self.backend_attempts}",
+                f"默认会话目录：{directory}",
+                f"目录检查：{'存在' if directory.is_dir() else '目录不存在'}",
+                f"默认监控索引：{default_index_path()}",
+                f"索引状态：{index.get('status', '尚未收到')}；错误：{index.get('last_error') or '无'}",
+                f"发现文件：{source.get('files', index.get('total_files', 0))}；导入事件：{source.get('imported_usage_events', 0)}",
+                f"累计 Token：{self.data.get('total', {}).get('total_tokens', 0)}；当前时段：{self.scope}",
+                f"后台日志：{runtime / 'backend.log'}",
+                "工作任务文件夹与会话日志目录不是同一个位置。",
+            ]
+        )
 
     def fetch(self):
         if self.network_busy:
@@ -801,6 +870,7 @@ class GlassWidget(QWidget):
         except (ValueError, TypeError, KeyError, OverflowError):
             self.connected = False
             self.update_status()
+            self.launch_backend()
         finally:
             reply.deleteLater()
 

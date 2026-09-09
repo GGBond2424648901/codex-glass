@@ -44,6 +44,163 @@ class GlassUITests(unittest.TestCase):
         self.widget.apply_data(telemetry())
         QTest.qWait(20)
 
+    def test_pin_checked_shape_changes_and_window_flag_matches(self):
+        from PyQt5.QtGui import QImage
+
+        self.widget.top_action.setChecked(False)
+        off = self.widget.pin.grab().toImage().convertToFormat(QImage.Format_ARGB32)
+        QTest.mouseClick(self.widget.pin, Qt.LeftButton)
+        self.assertTrue(self.widget.pin.isChecked())
+        self.assertTrue(self.widget.windowFlags() & Qt.WindowStaysOnTopHint)
+        on = self.widget.pin.grab().toImage().convertToFormat(QImage.Format_ARGB32)
+        # Active pin must differ in silhouette, not merely a barely visible tint.
+        changes = sum(
+            (off.pixelColor(x, y).alpha() > 200) != (on.pixelColor(x, y).alpha() > 200)
+            for y in range(5, 24)
+            for x in range(5, 24)
+        )
+        self.assertGreater(changes, 12)
+        self.assertIn("取消", self.widget.pin.toolTip())
+
+    def test_local_backend_ignores_configured_listen_port(self):
+        from unittest.mock import patch
+
+        self.widget.url = "http://127.0.0.1:8081"
+        self.widget.start_backend = True
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(os.environ, {"LOCALAPPDATA": folder}),
+            patch("codex_glass.desktop.widget.subprocess.Popen") as launch,
+        ):
+            self.widget.launch_backend()
+        command = launch.call_args.args[0]
+        self.assertIn("--host", command)
+        self.assertEqual("127.0.0.1", command[command.index("--host") + 1])
+        self.assertEqual("8081", command[command.index("--port") + 1])
+
+    def test_index_error_is_visible_in_empty_chart(self):
+        from datetime import datetime
+
+        data = {
+            "total": {},
+            "generated_at": datetime.now().isoformat(),
+            "index": {"status": "error", "last_error": "root mismatch"},
+        }
+        self.widget.apply_data(data)
+        self.assertIn("索引失败", getattr(self.widget.chart, "empty_text", ""))
+        self.assertIn("root mismatch", self.widget.dot.toolTip())
+        self.assertFalse(self.widget.chart.live)
+
+    def test_zero_series_still_renders_its_empty_state_message(self):
+        self.widget.set_motion(False)
+        chart = self.widget.chart
+        chart.set_series([0, 0], ["10:00", "11:00"], animate=False)
+        chart.empty_text = "正在扫描本机会话…"
+        before = chart.grab().toImage()
+        chart.empty_text = "当前时段暂无用量 · 可切换累计"
+        after = chart.grab().toImage()
+        self.assertNotEqual(before, after, "Zero-valued axis labels must not hide the status message")
+
+    def test_diagnostics_distinguishes_missing_directory_and_index_failure(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"CODEX_HOME": folder}):
+            self.widget.apply_data({"total": {}, "index": {"status": "error", "last_error": "root mismatch"}})
+            report = self.widget.data_diagnostics()
+        self.assertIn("目录不存在", report)
+        self.assertIn("root mismatch", report)
+        self.assertIn("sessions", report)
+        self.assertIn("http://127.0.0.1:1", report)
+
+    def test_loopback_data_bypasses_unavailable_system_proxy(self):
+        import json
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from PyQt5.QtNetwork import QNetworkProxy
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps(telemetry()).encode())
+
+            def log_message(self, *args):
+                pass
+
+        previous = QNetworkProxy.applicationProxy()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            QNetworkProxy.setApplicationProxy(QNetworkProxy(QNetworkProxy.HttpProxy, "127.0.0.1", 1))
+            self.widget.url = f"http://127.0.0.1:{server.server_port}"
+            self.widget.fetch()
+            deadline = time.monotonic() + 2
+            while not self.widget.connected and time.monotonic() < deadline:
+                QTest.qWait(20)
+            self.assertTrue(self.widget.connected, "Loopback telemetry must not depend on a user's HTTP proxy")
+        finally:
+            QNetworkProxy.setApplicationProxy(previous)
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_occupied_port_recovers_from_unrelated_http_service(self):
+        import json
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from unittest.mock import patch
+        from tests.helpers import sample_records, write_jsonl
+
+        class Unrelated(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"other_app": true}')
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Unrelated)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (
+                tempfile.TemporaryDirectory() as folder,
+                patch.dict(os.environ, {"CODEX_HOME": folder, "LOCALAPPDATA": folder, "CODEX_MONITOR_CONFIG": ""}),
+            ):
+                write_jsonl(Path(folder) / "sessions" / "one.jsonl", sample_records())
+                self.widget.url = f"http://127.0.0.1:{server.server_port}"
+                original = self.widget.url
+                from codex_glass.desktop.dashboard import NativeDashboard
+
+                dashboard = NativeDashboard(self.widget, url=original, persist=False, auto_fetch=False)
+                self.widget.dashboard = dashboard
+                self.widget.start_backend = True
+                self.widget.fetch()
+                deadline = time.monotonic() + 8
+                try:
+                    while self.widget.data.get("total", {}).get("total_tokens") != 195 and time.monotonic() < deadline:
+                        QTest.qWait(100)
+                        self.widget.fetch()
+                    self.assertEqual(195, self.widget.data.get("total", {}).get("total_tokens"))
+                    self.assertNotEqual(original, self.widget.url)
+                    self.assertEqual(self.widget.url, dashboard.url)
+                    self.assertTrue((Path(folder) / "codex-monitor.sqlite3").exists())
+                finally:
+                    dashboard.hide()
+                    dashboard.deleteLater()
+                    process = self.widget.backend_process
+                    if process is not None:
+                        process.terminate()
+                        process.wait(timeout=5)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def _run_main_lifecycle_probe(self, code):
         project_root = Path(__file__).resolve().parents[1]
         env = os.environ.copy()
@@ -370,7 +527,9 @@ class GlassUITests(unittest.TestCase):
                 w.launch_backend()
             args, kwargs = launch.call_args
             project_root = Path(__file__).resolve().parents[1]
-            self.assertEqual([sys.executable, str(project_root / "web_dashboard.py"), "--no-browser"], args[0])
+            self.assertEqual([sys.executable, str(project_root / "web_dashboard.py"), "--no-browser"], args[0][:3])
+            self.assertEqual(["--host", "127.0.0.1", "--port"], args[0][3:6])
+            self.assertEqual(f"http://127.0.0.1:{args[0][6]}", w.url)
             self.assertEqual(str(project_root), kwargs["cwd"])
             with patch("codex_glass.desktop.widget.time.monotonic", return_value=101):
                 w.launch_backend()

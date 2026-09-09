@@ -63,12 +63,17 @@ def parse_timestamp_local(timestamp_str: str) -> datetime:
         return datetime.now()
 
 
+def default_codex_home() -> Path:
+    custom = os.environ.get("CODEX_HOME", "").strip()
+    return Path(custom).expanduser().resolve() if custom else Path.home() / ".codex"
+
+
 def default_codex_sessions_dir() -> Path:
-    return Path.home() / ".codex" / "sessions"
+    return default_codex_home() / "sessions"
 
 
 def default_config_path() -> Path:
-    return Path.home() / ".codex" / "monitor_config.json"
+    return default_codex_home() / "monitor_config.json"
 
 
 def _workspace_label(index: int) -> str:
