@@ -68,6 +68,25 @@ class GlassUITests(unittest.TestCase):
         self.widget.render()
         self.assertNotIn("部分", self.widget.cost_title.text())
 
+    def test_low_quota_uses_amber_text_and_clears_on_recovery(self):
+        from PyQt5.QtGui import QPalette
+
+        data = telemetry()
+        data["rate_limits"]["limits"][0]["used_percent"] = 82
+        self.widget.apply_data(data)
+        self.widget.toggle_compact()
+        color = self.widget.mini_quota.palette().color(QPalette.WindowText)
+        self.assertGreater(color.red(), color.green())
+        self.assertEqual("18%", self.widget.mini_quota.text())
+        data["rate_limits"]["limits"][0]["used_percent"] = 0
+        self.widget.apply_data(data)
+        color = self.widget.mini_quota.palette().color(QPalette.WindowText)
+        self.assertGreater(color.green(), color.red())
+        self.assertEqual("100%", self.widget.mini_quota.text())
+        self.assertLessEqual(
+            self.widget.mini_quota.fontMetrics().horizontalAdvance("100%"), self.widget.mini_quota.width()
+        )
+
     def test_pin_checked_shape_changes_and_window_flag_matches(self):
         from PyQt5.QtGui import QImage
 

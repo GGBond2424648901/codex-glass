@@ -291,7 +291,7 @@ class GlassWidget(QWidget):
         self.quota_label = label(self.body, "额度", 16, MUTED)
         self.quota_label.setGeometry(32, 558, 220, 25)
         self.quota_text = label(self.body, "—", 16, INK)
-        self.quota_text.setGeometry(295, 563, 87, 24)
+        self.quota_text.setGeometry(289, 558, 96, 32)
         self.quota_reset = label(self.body, "", 13, MUTED)
         self.quota_reset.setGeometry(296, 589, 108, 21)
         self.collapse = IconButton("down", "折叠为迷你模式", self.body)
@@ -305,8 +305,8 @@ class GlassWidget(QWidget):
         self.mini_chart.setGeometry(27, 115, 371, 53)
         self.mini_chart.show_endpoint = True
         self.mini_chart.hide()
-        self.mini_quota = label(self, "—", 16, "#087f79", True)
-        self.mini_quota.setGeometry(354, 72, 61, 27)
+        self.mini_quota = label(self, "—", 22, "#087f79", True)
+        self.mini_quota.setGeometry(358, 68, 72, 36)
         self.mini_quota.hide()
         self.detail_popup = GlassInfoPopup(owner=self)
         self.detail_popup.setFixedWidth(355)
@@ -406,12 +406,12 @@ class GlassWidget(QWidget):
         if self.compact_mode:
             p.setPen(QPen(QColor(107, 137, 168, 100), 1))
             p.drawLine(194, 74, 194, 101)
-            ring = QRectF(316, 73, 27, 27)
+            ring = QRectF(313, 69, 34, 34)
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor(255, 255, 255, 150), 5))
+            p.setPen(QPen(QColor(255, 255, 255, 170), 7.5))
             p.drawEllipse(ring)
             if self.remaining is not None:
-                p.setPen(QPen(QColor(MINT), 5, Qt.SolidLine, Qt.RoundCap))
+                p.setPen(QPen(QColor(MINT if self.remaining > 20 else "#e9aa65"), 7.5, Qt.SolidLine, Qt.RoundCap))
                 p.drawArc(ring, 90 * 16, -round(self.remaining * 3.6 * 16))
             return
         p.setPen(QColor(255, 255, 255, 170))
@@ -552,7 +552,12 @@ class GlassWidget(QWidget):
         self.quota_label.setText(
             (plan + " · " if plan else "") + title + (" · " + status if status != "最近快照" else "")
         )
-        self.quota_text.setText(f'剩余 <b style="color:#087f79">{self.remaining:g}%</b>')
+        quota_ink = "#087f79" if self.remaining > 20 else "#9b5b12"
+        self.quota_text.setText(
+            f'<span style="font-size:13px">剩余 </span>'
+            f'<b style="font-size:22px;color:{quota_ink}">{self.remaining:g}%</b>'
+        )
+        self.mini_quota.setStyleSheet(f"color:{quota_ink};background:transparent;")
         self.mini_quota.setText(f"{self.remaining:g}%")
         reset = ""
         if row.get("resets_at"):
