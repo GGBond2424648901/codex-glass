@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from codex_monitor_core import (
+from codex_glass.core.usage import (
     MonitorConfig,
     PricingRatesPerMillion,
     aggregate_usage_events,
@@ -13,16 +13,27 @@ from codex_monitor_core import (
     parse_usage_events_from_session_file,
 )
 from tests.helpers import sample_records, write_jsonl
-import codex_monitor_index as index_module
+import codex_glass.storage.index as index_module
 
 
 class AggregateUsageEventsTests(unittest.TestCase):
     def test_workspace_windows_follow_the_same_time_boundaries_as_models(self):
-        events=[index_module.UsageEvent(self.now-timedelta(hours=h),'alpha','C:/work/a',index_module.UsageDelta(10,2,3,1,13),0,'unpriced') for h in (1,6,26)]
-        summary=aggregate_usage_events(events,[],MonitorConfig.load(self.config_path),now=self.now)
-        self.assertEqual(26,sum(r['total_tokens'] for r in summary['windows']['today']['by_cwd'].values()))
-        self.assertEqual(13,sum(r['total_tokens'] for r in summary['windows']['last_5_hours']['by_cwd'].values()))
-        self.assertEqual(39,sum(r['total_tokens'] for r in summary['by_cwd'].values()))
+        events = [
+            index_module.UsageEvent(
+                self.now - timedelta(hours=h),
+                "alpha",
+                "C:/work/a",
+                index_module.UsageDelta(10, 2, 3, 1, 13),
+                0,
+                "unpriced",
+            )
+            for h in (1, 6, 26)
+        ]
+        summary = aggregate_usage_events(events, [], MonitorConfig.load(self.config_path), now=self.now)
+        self.assertEqual(26, sum(r["total_tokens"] for r in summary["windows"]["today"]["by_cwd"].values()))
+        self.assertEqual(13, sum(r["total_tokens"] for r in summary["windows"]["last_5_hours"]["by_cwd"].values()))
+        self.assertEqual(39, sum(r["total_tokens"] for r in summary["by_cwd"].values()))
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -79,14 +90,19 @@ class AggregateUsageEventsTests(unittest.TestCase):
 
     def test_charts_use_fixed_five_minute_rates_zero_fill_and_exclude_future(self) -> None:
         events = [
-            index_module.UsageEvent(datetime(2026, 9, 8, 9, 34), "alpha", None,
-                                    index_module.UsageDelta(0, 0, 0, 0, 50), 0, "unpriced"),
-            index_module.UsageEvent(datetime(2026, 9, 8, 9, 36), "beta", None,
-                                    index_module.UsageDelta(0, 0, 0, 0, 100), 0, "unpriced"),
-            index_module.UsageEvent(datetime(2026, 9, 8, 10, 1), "future", None,
-                                    index_module.UsageDelta(0, 0, 0, 0, 999), 0, "unpriced"),
+            index_module.UsageEvent(
+                datetime(2026, 9, 8, 9, 34), "alpha", None, index_module.UsageDelta(0, 0, 0, 0, 50), 0, "unpriced"
+            ),
+            index_module.UsageEvent(
+                datetime(2026, 9, 8, 9, 36), "beta", None, index_module.UsageDelta(0, 0, 0, 0, 100), 0, "unpriced"
+            ),
+            index_module.UsageEvent(
+                datetime(2026, 9, 8, 10, 1), "future", None, index_module.UsageDelta(0, 0, 0, 0, 999), 0, "unpriced"
+            ),
         ]
-        summary = aggregate_usage_events(events, [], self.config_path and MonitorConfig.load(self.config_path), now=self.now)
+        summary = aggregate_usage_events(
+            events, [], self.config_path and MonitorConfig.load(self.config_path), now=self.now
+        )
         today = summary["charts"]["today"]
         self.assertEqual(7, len(today["labels"]))
         self.assertEqual("2026-09-08T09:30:00", today["labels"][0])
@@ -99,12 +115,30 @@ class AggregateUsageEventsTests(unittest.TestCase):
     def test_chart_buckets_do_not_include_events_before_non_aligned_cutoffs(self) -> None:
         now = datetime(2026, 9, 8, 10, 2, 30)
         events = [
-            index_module.UsageEvent(datetime(2026, 9, 8, 9, 32, 29), "outside-30m", None,
-                                    index_module.UsageDelta(0, 0, 0, 0, 500), 0, "unpriced"),
-            index_module.UsageEvent(datetime(2026, 9, 8, 5, 2, 29), "outside-5h", None,
-                                    index_module.UsageDelta(0, 0, 0, 0, 500), 0, "unpriced"),
-            index_module.UsageEvent(datetime(2026, 9, 8, 9, 32, 30), "boundary", None,
-                                    index_module.UsageDelta(0, 0, 0, 0, 50), 0, "unpriced"),
+            index_module.UsageEvent(
+                datetime(2026, 9, 8, 9, 32, 29),
+                "outside-30m",
+                None,
+                index_module.UsageDelta(0, 0, 0, 0, 500),
+                0,
+                "unpriced",
+            ),
+            index_module.UsageEvent(
+                datetime(2026, 9, 8, 5, 2, 29),
+                "outside-5h",
+                None,
+                index_module.UsageDelta(0, 0, 0, 0, 500),
+                0,
+                "unpriced",
+            ),
+            index_module.UsageEvent(
+                datetime(2026, 9, 8, 9, 32, 30),
+                "boundary",
+                None,
+                index_module.UsageDelta(0, 0, 0, 0, 50),
+                0,
+                "unpriced",
+            ),
         ]
         charts = aggregate_usage_events(events, [], MonitorConfig.load(self.config_path), now=now)["charts"]
         self.assertEqual(10.0, sum(charts["today"]["values"]))
@@ -114,8 +148,14 @@ class AggregateUsageEventsTests(unittest.TestCase):
 
     def test_all_chart_is_daily_raw_tokens_capped_to_ninety_days(self) -> None:
         events = [
-            index_module.UsageEvent(self.now - timedelta(days=days), "alpha", None,
-                                    index_module.UsageDelta(0, 0, 0, 0, days + 1), 0, "unpriced")
+            index_module.UsageEvent(
+                self.now - timedelta(days=days),
+                "alpha",
+                None,
+                index_module.UsageDelta(0, 0, 0, 0, days + 1),
+                0,
+                "unpriced",
+            )
             for days in range(100)
         ]
         chart = aggregate_usage_events(events, [], MonitorConfig.load(self.config_path), now=self.now)["charts"]["all"]
@@ -148,21 +188,57 @@ class IndexedSummaryEquivalenceTests(unittest.TestCase):
         records[2]["timestamp"] = "2026-09-06T01:00:00"
         records[3]["timestamp"] = "2026-09-08T09:01:00"
         records.insert(3, {"type": "turn_context", "payload": {"model": "gpt-5-mini", "cwd": "C:/work/b"}})
-        records.extend([
-            {"timestamp": "2026-09-08T09:02:00", "type": "token_count", "payload": {"info": None, "rate_limits": {"limit_id": "codex", "primary": {"used_percent": 30, "window_minutes": 300, "resets_in_seconds": 3600}}}},
-            {"timestamp": "2026-09-08T09:03:00", "type": "token_count", "payload": {"info": None, "rate_limits": {"limit_id": "model-only", "limit_name": "Special model", "primary": {"used_percent": 90, "window_minutes": 300, "resets_in_seconds": 7200}}}},
-        ])
+        records.extend(
+            [
+                {
+                    "timestamp": "2026-09-08T09:02:00",
+                    "type": "token_count",
+                    "payload": {
+                        "info": None,
+                        "rate_limits": {
+                            "limit_id": "codex",
+                            "primary": {"used_percent": 30, "window_minutes": 300, "resets_in_seconds": 3600},
+                        },
+                    },
+                },
+                {
+                    "timestamp": "2026-09-08T09:03:00",
+                    "type": "token_count",
+                    "payload": {
+                        "info": None,
+                        "rate_limits": {
+                            "limit_id": "model-only",
+                            "limit_name": "Special model",
+                            "primary": {"used_percent": 90, "window_minutes": 300, "resets_in_seconds": 7200},
+                        },
+                    },
+                },
+            ]
+        )
         write_jsonl(self.sessions / "one.jsonl", records)
         other = sample_records()
         other[0]["payload"]["cwd"] = "C:/work/a/subdirectory"
         other[2]["timestamp"] = "2026-09-08T09:01:00"
         other[3]["timestamp"] = "2026-09-08T09:30:00"
-        other.append({"timestamp": "2026-09-08T09:40:00", "type": "token_count", "payload": {"rate_limits": {"limit_id": "codex", "primary": {"used_percent": 40, "window_minutes": 300, "resets_in_seconds": 3600}}}})
+        other.append(
+            {
+                "timestamp": "2026-09-08T09:40:00",
+                "type": "token_count",
+                "payload": {
+                    "rate_limits": {
+                        "limit_id": "codex",
+                        "primary": {"used_percent": 40, "window_minutes": 300, "resets_in_seconds": 3600},
+                    }
+                },
+            }
+        )
         write_jsonl(self.sessions / "two.jsonl", other)
         index_module.SessionIndexer(self.index, self.config).scan_once(self.sessions)
         for cwd_filter in (None, "C:/work/a"):
             with self.subTest(cwd_filter=cwd_filter):
-                expected = build_usage_summary(self.sessions, self.config, cwd_filter=cwd_filter, now=self.now, include_events=True)
+                expected = build_usage_summary(
+                    self.sessions, self.config, cwd_filter=cwd_filter, now=self.now, include_events=True
+                )
                 actual = self.summary(cwd_filter=cwd_filter, include_events=True)
                 self.assertEqual(expected, {key: value for key, value in actual.items() if key != "index"})
                 self.assertEqual("ready", actual["index"]["status"])
@@ -173,7 +249,11 @@ class IndexedSummaryEquivalenceTests(unittest.TestCase):
         write_jsonl(self.sessions / "one.jsonl", sample_records())
         index_module.SessionIndexer(self.index, self.config).scan_once(self.sessions)
         self.summary()
-        config = replace(self.config, pricing_per_million={"new-price": PricingRatesPerMillion(10, 1, 100)}, model_aliases={"gpt-5": "new-price"})
+        config = replace(
+            self.config,
+            pricing_per_million={"new-price": PricingRatesPerMillion(10, 1, 100)},
+            model_aliases={"gpt-5": "new-price"},
+        )
         actual = self.summary(config=config, include_events=True)
         self.assertAlmostEqual(0.00393, actual["total"]["estimated_cost_usd"])
         self.assertEqual("alias:new-price", actual["events"][0]["pricing_source"])
@@ -183,9 +263,19 @@ class IndexedSummaryEquivalenceTests(unittest.TestCase):
             records = sample_records()
             records[1]["payload"]["model"] = model
             records[2]["timestamp"] = records[3]["timestamp"] = "2026-09-08T09:00:00"
-            records.append({"timestamp": "2026-09-08T09:01:00", "type": "token_count", "payload": {
-                "rate_limits": {"limit_id": "codex", "limit_name": model,
-                                "primary": {"used_percent": 30, "window_minutes": 300, "resets_in_seconds": 3600}}}})
+            records.append(
+                {
+                    "timestamp": "2026-09-08T09:01:00",
+                    "type": "token_count",
+                    "payload": {
+                        "rate_limits": {
+                            "limit_id": "codex",
+                            "limit_name": model,
+                            "primary": {"used_percent": 30, "window_minutes": 300, "resets_in_seconds": 3600},
+                        }
+                    },
+                }
+            )
             write_jsonl(self.sessions / filename, records)
         index_module.SessionIndexer(self.index, self.config).scan_once(self.sessions)
         expected = build_usage_summary(self.sessions, self.config, now=self.now, include_events=True)
@@ -198,7 +288,7 @@ class IndexedSummaryEquivalenceTests(unittest.TestCase):
         original = self.summary()
         self.index.close()
         self.index.initialize()
-        with mock.patch("codex_monitor_index.aggregate_usage_events", side_effect=AssertionError("cache miss")):
+        with mock.patch("codex_glass.storage.index.aggregate_usage_events", side_effect=AssertionError("cache miss")):
             cached = self.summary()
         self.assertEqual(original, cached)
         later = self.summary(now=self.now + timedelta(days=7))
@@ -213,7 +303,13 @@ class IndexedSummaryEquivalenceTests(unittest.TestCase):
     def test_summary_cache_key_is_stable_and_covers_presentation_inputs(self):
         self.assertTrue(hasattr(index_module, "summary_cache_key"), "summary cache key is missing")
         key = index_module.summary_cache_key(self.config, None, False)
-        reordered = replace(self.config, host="other-host", port=9000, pricing_per_million=dict(reversed(list(self.config.pricing_per_million.items()))), model_aliases=dict(reversed(list(self.config.model_aliases.items()))))
+        reordered = replace(
+            self.config,
+            host="other-host",
+            port=9000,
+            pricing_per_million=dict(reversed(list(self.config.pricing_per_million.items()))),
+            model_aliases=dict(reversed(list(self.config.model_aliases.items()))),
+        )
         self.assertEqual(key, index_module.summary_cache_key(reordered, None, False))
         self.assertEqual(64, len(key))
         self.assertNotEqual(key, index_module.summary_cache_key(self.config, "C:/work/a", False))
@@ -236,7 +332,7 @@ class IndexedSummaryEquivalenceTests(unittest.TestCase):
                 other.build_summary(self.config, now=self.now)
             return aggregate_usage_events(*args, **kwargs)
 
-        with mock.patch("codex_monitor_index.aggregate_usage_events", side_effect=advance_before_aggregation):
+        with mock.patch("codex_glass.storage.index.aggregate_usage_events", side_effect=advance_before_aggregation):
             older_read = self.summary()
         self.assertEqual(195, older_read["total"]["total_tokens"])
         self.assertEqual(390, self.index.cached_summary(self.config)["total"]["total_tokens"])

@@ -395,7 +395,11 @@ class RateLimitSnapshot:
             if "resets_at" in primary:
                 resets_at_epoch = primary.get("resets_at")
                 try:
-                    resets_at_dt = datetime.fromtimestamp(float(resets_at_epoch), tz=timezone.utc).astimezone(tz=None).replace(tzinfo=None)
+                    resets_at_dt = (
+                        datetime.fromtimestamp(float(resets_at_epoch), tz=timezone.utc)
+                        .astimezone(tz=None)
+                        .replace(tzinfo=None)
+                    )
                 except Exception:
                     resets_at_dt = None
             if "resets_in_seconds" in primary:
@@ -708,7 +712,9 @@ def aggregate_usage_events(
     five_hours_ago = current_time - timedelta(hours=5)
     fifteen_minutes_ago = current_time - timedelta(minutes=15)
     sixty_minutes_ago = current_time - timedelta(minutes=60)
-    week_start = (current_time - timedelta(days=current_time.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = (current_time - timedelta(days=current_time.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     five_hour_slot_minutes = 5
 
     all_events: List[UsageEvent] = []
@@ -797,7 +803,9 @@ def aggregate_usage_events(
     today_chart_models: Dict[str, List[int]] = {}
     five_hour_chart_models: Dict[str, List[int]] = {}
     eligible_dates = [event.timestamp.date() for event in all_events if event.timestamp <= current_time]
-    earliest_chart_date = max(min(eligible_dates), current_time.date() - timedelta(days=89)) if eligible_dates else current_time.date()
+    earliest_chart_date = (
+        max(min(eligible_dates), current_time.date() - timedelta(days=89)) if eligible_dates else current_time.date()
+    )
     all_chart_dates = []
     chart_date = earliest_chart_date
     while chart_date <= current_time.date():
@@ -974,8 +982,9 @@ def aggregate_usage_events(
         return {
             "labels": [point.isoformat(timespec="seconds") for point in times],
             "values": [round(value / 5.0, 2) for value in totals],
-            "by_model": {model: [round(value / 5.0, 2) for value in values]
-                         for model, values in sorted(models.items())},
+            "by_model": {
+                model: [round(value / 5.0, 2) for value in values] for model, values in sorted(models.items())
+            },
             "unit": "Token / min",
             "bucket_minutes": 5,
         }
@@ -1077,7 +1086,9 @@ def aggregate_usage_events(
     active_slots = sum(1 for st in five_hour_by_slot.values() if int(st.get("total_tokens", 0)) > 0)
     last_event = all_events[-1] if all_events else None
     five_hour_models_active = sum(1 for st in five_hour_by_model.values() if int(st.get("total_tokens", 0)) > 0)
-    five_hour_cwds_active = len({(event.cwd or "unknown") for event in all_events if five_hours_ago <= event.timestamp <= current_time})
+    five_hour_cwds_active = len(
+        {(event.cwd or "unknown") for event in all_events if five_hours_ago <= event.timestamp <= current_time}
+    )
 
     tokens_per_minute_5h = round(float(five_hour.get("total_tokens", 0)) / 300.0, 2)
     tokens_per_minute_15m = round(float(recent_15m.get("total_tokens", 0)) / 15.0, 2)
@@ -1140,8 +1151,12 @@ def aggregate_usage_events(
         "anomaly_level": anomaly_level,
         "anomaly_flag": anomaly_level,
         "last_event_at": last_event.timestamp.isoformat(sep=" ", timespec="seconds") if last_event else None,
-        "seconds_since_last_event": max(0, int((current_time - last_event.timestamp).total_seconds())) if last_event else None,
-        "last_activity_seconds": max(0, int((current_time - last_event.timestamp).total_seconds())) if last_event else None,
+        "seconds_since_last_event": (
+            max(0, int((current_time - last_event.timestamp).total_seconds())) if last_event else None
+        ),
+        "last_activity_seconds": (
+            max(0, int((current_time - last_event.timestamp).total_seconds())) if last_event else None
+        ),
         "freshness_seconds": max(0, int((current_time - last_event.timestamp).total_seconds())) if last_event else None,
         "window_utilization_percent": official_window_used_percent,
         "official_window_used_percent": official_window_used_percent,
@@ -1184,7 +1199,9 @@ def aggregate_usage_events(
             "cwd_filter": "enabled" if cwd_filter else None,
             "files": int(source_metadata.get("files", 0)),
             "latest_event_at": last_event.timestamp.isoformat(sep=" ", timespec="seconds") if last_event else None,
-            "refresh_lag_seconds": max(0, int((current_time - last_event.timestamp).total_seconds())) if last_event else None,
+            "refresh_lag_seconds": (
+                max(0, int((current_time - last_event.timestamp).total_seconds())) if last_event else None
+            ),
             "paths_redacted": True,
         },
         "total": total,
@@ -1245,7 +1262,8 @@ def aggregate_usage_events(
                     },
                 }
             )
-        if event_sink is None:summary["events"] = events_payload
+        if event_sink is None:
+            summary["events"] = events_payload
         summary["events_count"] = len(all_events)
 
     return summary

@@ -7,12 +7,13 @@ try:
     from PyQt5.QtCore import QPoint, Qt
     from PyQt5.QtTest import QTest
     from PyQt5.QtWidgets import QApplication, QGraphicsScene, QWidget
+
     HAS_QT = True
 except ImportError:
     HAS_QT = False
 
 if HAS_QT:
-    from glass_popups import GlassChoicePopup, GlassInfoPopup, GlassMenu
+    from codex_glass.desktop.components.popups import GlassChoicePopup, GlassInfoPopup, GlassMenu
 
 
 @unittest.skipUnless(HAS_QT, "optional desktop dependency PyQt5 not installed")
@@ -118,12 +119,13 @@ class GlassPopupTests(unittest.TestCase):
         self.assertGreater(popup.choice_scroll.verticalScrollBar().maximum(), 0)
 
     def test_model_choices_are_readable_and_not_compressed_before_parenting(self):
-        popup=self.keep(GlassChoicePopup(['gpt-6-astra','gpt-5.6-sol','gpt-5.6-terra'],set(),None,multi=True))
-        popup.popup(QPoint(20,20));QTest.qWait(10)
+        popup = self.keep(GlassChoicePopup(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"], set(), None, multi=True))
+        popup.popup(QPoint(20, 20))
+        QTest.qWait(10)
         for choice in popup.choices:
-            self.assertGreaterEqual(choice.height(),44)
-            self.assertGreaterEqual(choice.font().pixelSize(),18)
-        self.assertGreaterEqual(popup.choice_scroll.height(),132)
+            self.assertGreaterEqual(choice.height(), 44)
+            self.assertGreaterEqual(choice.font().pixelSize(), 18)
+        self.assertGreaterEqual(popup.choice_scroll.height(), 132)
 
     def test_choice_keyboard_moves_focus_and_escape_never_applies(self):
         selected = []

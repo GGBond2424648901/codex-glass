@@ -9,7 +9,7 @@ try:
     from PyQt5.QtTest import QSignalSpy
     from PyQt5.QtWidgets import QApplication
 
-    from glass_chart import GlassChart
+    from codex_glass.desktop.components.chart import GlassChart
 
     HAS_QT = True
 except ImportError:

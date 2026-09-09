@@ -12,19 +12,34 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator
 
 
-_ROLLOUT_ID = re.compile(
-    r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=\.jsonl$)"
-)
+_ROLLOUT_ID = re.compile(r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=\.jsonl$)")
 _REQUIRED_SOURCE_COLUMNS = {
     "session_files": {"file_id", "path", "size", "mtime_ns", "head_hash"},
     "usage_events": {
-        "file_id", "source_offset", "occurred_at", "model", "cwd", "input_tokens",
-        "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens",
-        "pricing_source", "created_at",
+        "file_id",
+        "source_offset",
+        "occurred_at",
+        "model",
+        "cwd",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "pricing_source",
+        "created_at",
     },
     "rate_limit_snapshots": {
-        "file_id", "source_offset", "limit_id", "limit_name", "observed_at", "used_percent",
-        "window_minutes", "resets_at", "resets_in_seconds", "created_at",
+        "file_id",
+        "source_offset",
+        "limit_id",
+        "limit_name",
+        "observed_at",
+        "used_percent",
+        "window_minutes",
+        "resets_at",
+        "resets_in_seconds",
+        "created_at",
     },
     "index_state": {"singleton_id", "sessions_root"},
 }
@@ -81,23 +96,60 @@ def session_key(path: str, head_hash: str = "") -> str:
     return _digest("session-path-v1", (str(path).replace("\\", "/").lower(),))
 
 
-def usage_event_key(session: str, source_offset: int, occurred_at: str, model: str | None,
-                    cwd: str | None, input_tokens: int, cached_input_tokens: int,
-                    output_tokens: int, reasoning_output_tokens: int, total_tokens: int) -> str:
-    return _digest("usage-event-v1", (
-        session, int(source_offset), occurred_at, model, cwd, int(input_tokens),
-        int(cached_input_tokens), int(output_tokens), int(reasoning_output_tokens), int(total_tokens),
-    ))
+def usage_event_key(
+    session: str,
+    source_offset: int,
+    occurred_at: str,
+    model: str | None,
+    cwd: str | None,
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    reasoning_output_tokens: int,
+    total_tokens: int,
+) -> str:
+    return _digest(
+        "usage-event-v1",
+        (
+            session,
+            int(source_offset),
+            occurred_at,
+            model,
+            cwd,
+            int(input_tokens),
+            int(cached_input_tokens),
+            int(output_tokens),
+            int(reasoning_output_tokens),
+            int(total_tokens),
+        ),
+    )
 
 
-def rate_limit_key(session: str, source_offset: int, limit_id: str | None,
-                   limit_name: str | None, observed_at: str, used_percent: float | None,
-                   window_minutes: int | None, resets_at: str | None,
-                   resets_in_seconds: int | None) -> str:
-    return _digest("rate-limit-v1", (
-        session, int(source_offset), limit_id, limit_name, observed_at, used_percent,
-        window_minutes, resets_at, resets_in_seconds,
-    ))
+def rate_limit_key(
+    session: str,
+    source_offset: int,
+    limit_id: str | None,
+    limit_name: str | None,
+    observed_at: str,
+    used_percent: float | None,
+    window_minutes: int | None,
+    resets_at: str | None,
+    resets_in_seconds: int | None,
+) -> str:
+    return _digest(
+        "rate-limit-v1",
+        (
+            session,
+            int(source_offset),
+            limit_id,
+            limit_name,
+            observed_at,
+            used_percent,
+            window_minutes,
+            resets_at,
+            resets_in_seconds,
+        ),
+    )
 
 
 def ensure_import_schema(connection: sqlite3.Connection) -> None:
@@ -216,9 +268,7 @@ class HistoryImporter:
                 raise HistoryImportError(f"Source SQLite integrity check failed: {integrity}")
             if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 1:
                 raise HistoryImportError("Source SQLite schema version is unsupported")
-            tables = {row[0] for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )}
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for table, required in _REQUIRED_SOURCE_COLUMNS.items():
                 if table not in tables:
                     raise HistoryImportError(f"Source SQLite table is missing: {table}")
@@ -255,25 +305,31 @@ class HistoryImporter:
             raise HistoryImportError(f"Source SQLite database is invalid: {error}") from error
         try:
             self._validate_source(source)
-            state = source.execute(
-                "SELECT sessions_root FROM index_state WHERE singleton_id=1"
-            ).fetchone()
+            state = source.execute("SELECT sessions_root FROM index_state WHERE singleton_id=1").fetchone()
             sessions_root = state[0] if state else None
             source_counts = {
                 table: int(source.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
                 for table in ("session_files", "usage_events", "rate_limit_snapshots")
             }
-            files = list(source.execute(
-                "SELECT file_id, path, head_hash, size, mtime_ns FROM session_files ORDER BY file_id"
-            ))
+            files = list(
+                source.execute("SELECT file_id, path, head_hash, size, mtime_ns FROM session_files ORDER BY file_id")
+            )
             file_keys = {int(row["file_id"]): session_key(row["path"], row["head_hash"]) for row in files}
 
             with self.target.indexing_lease():
                 backup = self._backup_target(source_id)
                 with self.target.write_transaction() as target:
                     before = {
-                        table: int(target.execute(f"SELECT COUNT(*) FROM {table} WHERE source_id=?", (source_id,)).fetchone()[0])
-                        for table in ("imported_session_files", "imported_usage_events", "imported_rate_limit_snapshots")
+                        table: int(
+                            target.execute(f"SELECT COUNT(*) FROM {table} WHERE source_id=?", (source_id,)).fetchone()[
+                                0
+                            ]
+                        )
+                        for table in (
+                            "imported_session_files",
+                            "imported_usage_events",
+                            "imported_rate_limit_snapshots",
+                        )
                     }
                     now = time.time()
                     target.execute(
@@ -287,29 +343,66 @@ class HistoryImporter:
                                source_files=excluded.source_files,
                                source_usage_events=excluded.source_usage_events,
                                source_rate_limit_snapshots=excluded.source_rate_limit_snapshots""",
-                        (source_id, source_sha256, str(source_path), sessions_root, now, now,
-                         source_counts["session_files"], source_counts["usage_events"],
-                         source_counts["rate_limit_snapshots"]),
+                        (
+                            source_id,
+                            source_sha256,
+                            str(source_path),
+                            sessions_root,
+                            now,
+                            now,
+                            source_counts["session_files"],
+                            source_counts["usage_events"],
+                            source_counts["rate_limit_snapshots"],
+                        ),
                     )
                     target.executemany(
                         """INSERT OR IGNORE INTO imported_session_files(
                                source_id, source_file_id, source_path, session_key, head_hash, size, mtime_ns)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        [(source_id, int(row["file_id"]), row["path"], file_keys[int(row["file_id"])],
-                          row["head_hash"], int(row["size"]), int(row["mtime_ns"])) for row in files],
+                        [
+                            (
+                                source_id,
+                                int(row["file_id"]),
+                                row["path"],
+                                file_keys[int(row["file_id"])],
+                                row["head_hash"],
+                                int(row["size"]),
+                                int(row["mtime_ns"]),
+                            )
+                            for row in files
+                        ],
                     )
 
                     def usage_rows() -> Iterator[tuple[Any, ...]]:
                         for row in source.execute("SELECT * FROM usage_events ORDER BY event_id"):
                             key = usage_event_key(
-                                file_keys[int(row["file_id"])], row["source_offset"], row["occurred_at"],
-                                row["model"], row["cwd"], row["input_tokens"], row["cached_input_tokens"],
-                                row["output_tokens"], row["reasoning_output_tokens"], row["total_tokens"],
+                                file_keys[int(row["file_id"])],
+                                row["source_offset"],
+                                row["occurred_at"],
+                                row["model"],
+                                row["cwd"],
+                                row["input_tokens"],
+                                row["cached_input_tokens"],
+                                row["output_tokens"],
+                                row["reasoning_output_tokens"],
+                                row["total_tokens"],
                             )
-                            yield (source_id, key, row["file_id"], row["source_offset"], row["occurred_at"],
-                                   row["model"], row["cwd"], row["input_tokens"], row["cached_input_tokens"],
-                                   row["output_tokens"], row["reasoning_output_tokens"], row["total_tokens"],
-                                   row["pricing_source"], row["created_at"])
+                            yield (
+                                source_id,
+                                key,
+                                row["file_id"],
+                                row["source_offset"],
+                                row["occurred_at"],
+                                row["model"],
+                                row["cwd"],
+                                row["input_tokens"],
+                                row["cached_input_tokens"],
+                                row["output_tokens"],
+                                row["reasoning_output_tokens"],
+                                row["total_tokens"],
+                                row["pricing_source"],
+                                row["created_at"],
+                            )
 
                     for batch in _chunks(usage_rows()):
                         target.executemany(
@@ -324,13 +417,30 @@ class HistoryImporter:
                     def rate_rows() -> Iterator[tuple[Any, ...]]:
                         for row in source.execute("SELECT * FROM rate_limit_snapshots ORDER BY snapshot_id"):
                             key = rate_limit_key(
-                                file_keys[int(row["file_id"])], row["source_offset"], row["limit_id"],
-                                row["limit_name"], row["observed_at"], row["used_percent"],
-                                row["window_minutes"], row["resets_at"], row["resets_in_seconds"],
+                                file_keys[int(row["file_id"])],
+                                row["source_offset"],
+                                row["limit_id"],
+                                row["limit_name"],
+                                row["observed_at"],
+                                row["used_percent"],
+                                row["window_minutes"],
+                                row["resets_at"],
+                                row["resets_in_seconds"],
                             )
-                            yield (source_id, key, row["file_id"], row["source_offset"], row["limit_id"],
-                                   row["limit_name"], row["observed_at"], row["used_percent"],
-                                   row["window_minutes"], row["resets_at"], row["resets_in_seconds"], row["created_at"])
+                            yield (
+                                source_id,
+                                key,
+                                row["file_id"],
+                                row["source_offset"],
+                                row["limit_id"],
+                                row["limit_name"],
+                                row["observed_at"],
+                                row["used_percent"],
+                                row["window_minutes"],
+                                row["resets_at"],
+                                row["resets_in_seconds"],
+                                row["created_at"],
+                            )
 
                     for batch in _chunks(rate_rows()):
                         target.executemany(
@@ -342,8 +452,16 @@ class HistoryImporter:
                         )
 
                     after = {
-                        table: int(target.execute(f"SELECT COUNT(*) FROM {table} WHERE source_id=?", (source_id,)).fetchone()[0])
-                        for table in ("imported_session_files", "imported_usage_events", "imported_rate_limit_snapshots")
+                        table: int(
+                            target.execute(f"SELECT COUNT(*) FROM {table} WHERE source_id=?", (source_id,)).fetchone()[
+                                0
+                            ]
+                        )
+                        for table in (
+                            "imported_session_files",
+                            "imported_usage_events",
+                            "imported_rate_limit_snapshots",
+                        )
                     }
                     inserted = {table: after[table] - before[table] for table in after}
                     if any(inserted.values()) or before["imported_session_files"] == 0:
@@ -353,10 +471,14 @@ class HistoryImporter:
             source.close()
 
         return ImportResult(
-            source_id, source_sha256, inserted["imported_session_files"], inserted["imported_usage_events"],
+            source_id,
+            source_sha256,
+            inserted["imported_session_files"],
+            inserted["imported_usage_events"],
             inserted["imported_rate_limit_snapshots"],
             source_counts["usage_events"] - inserted["imported_usage_events"],
-            source_counts["rate_limit_snapshots"] - inserted["imported_rate_limit_snapshots"], str(backup),
+            source_counts["rate_limit_snapshots"] - inserted["imported_rate_limit_snapshots"],
+            str(backup),
         )
 
     def list_sources(self) -> list[dict[str, Any]]:
@@ -373,11 +495,17 @@ class HistoryImporter:
                 if target.execute("SELECT 1 FROM history_imports WHERE source_id=?", (source_id,)).fetchone() is None:
                     raise HistoryImportError("Imported history source was not found")
                 counts = {
-                    table: int(target.execute(f"SELECT COUNT(*) FROM {table} WHERE source_id=?", (source_id,)).fetchone()[0])
+                    table: int(
+                        target.execute(f"SELECT COUNT(*) FROM {table} WHERE source_id=?", (source_id,)).fetchone()[0]
+                    )
                     for table in ("imported_session_files", "imported_usage_events", "imported_rate_limit_snapshots")
                 }
                 target.execute("DELETE FROM history_imports WHERE source_id=?", (source_id,))
                 target.execute("UPDATE index_state SET generation=generation+1 WHERE singleton_id=1")
                 target.execute("DELETE FROM summary_cache")
-        return RemoveResult(source_id, counts["imported_session_files"], counts["imported_usage_events"],
-                            counts["imported_rate_limit_snapshots"])
+        return RemoveResult(
+            source_id,
+            counts["imported_session_files"],
+            counts["imported_usage_events"],
+            counts["imported_rate_limit_snapshots"],
+        )

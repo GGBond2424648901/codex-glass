@@ -68,7 +68,7 @@ class GlassHostTests(unittest.TestCase):
         QTest.qWait(10)
 
     def make_host(self, surface=None, **kwargs):
-        from glass_host import ScaledSurfaceHost
+        from codex_glass.desktop.components.host import ScaledSurfaceHost
 
         surface = surface or _ButtonSurface()
         host = ScaledSurfaceHost(surface, **kwargs)
@@ -80,7 +80,7 @@ class GlassHostTests(unittest.TestCase):
         return surface, host
 
     def test_scaled_host_module_is_available(self):
-        self.assertIsNotNone(importlib.util.find_spec("glass_host"))
+        self.assertIsNotNone(importlib.util.find_spec("codex_glass.desktop.components.host"))
 
     def test_set_scale_clamps_resizes_and_emits_float(self):
         surface, host = self.make_host(scale=1.0, min_scale=0.7, max_scale=1.5)
@@ -179,8 +179,8 @@ class GlassWidgetHostIntegrationTests(unittest.TestCase):
         cls.app.setQuitOnLastWindowClosed(False)
 
     def setUp(self):
-        from frosted_desktop import GlassWidget
-        from glass_host import ScaledSurfaceHost
+        from codex_glass.desktop.widget import GlassWidget
+        from codex_glass.desktop.components.host import ScaledSurfaceHost
 
         self.widget = GlassWidget(url="http://127.0.0.1:1", start_backend=False, persist=False)
         self.widget.timer.stop()
@@ -276,7 +276,7 @@ class GlassWidgetHostIntegrationTests(unittest.TestCase):
         self.assertTrue(self.widget.timer.isActive())
 
     def test_widget_popups_are_unparented_glass_windows_and_screen_clamped(self):
-        from glass_popups import GlassInfoPopup, GlassMenu
+        from codex_glass.desktop.components.popups import GlassInfoPopup, GlassMenu
 
         self.assertIsInstance(self.widget.menu, GlassMenu)
         self.assertIsInstance(self.widget.detail_popup, GlassInfoPopup)
@@ -304,14 +304,14 @@ class GlassWidgetHostIntegrationTests(unittest.TestCase):
 
     def test_open_dashboard_uses_native_lazy_entrypoint(self):
         calls = []
-        module = types.ModuleType("native_dashboard")
+        module = types.ModuleType("codex_glass.desktop.dashboard")
 
         def open_dashboard(owner):
             calls.append(owner)
             return "native-dashboard"
 
         module.open_dashboard = open_dashboard
-        with patch.dict(sys.modules, {"native_dashboard": module}):
+        with patch.dict(sys.modules, {"codex_glass.desktop.dashboard": module}):
             result = self.widget.open_dashboard()
 
         self.assertEqual("native-dashboard", result)

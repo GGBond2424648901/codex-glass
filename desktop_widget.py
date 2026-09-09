@@ -1,6 +1,8 @@
-"""Backward-compatible entry point for Codex Glass."""
-from frosted_desktop import GlassWidget, ModelRow, app_icon, main
+#!/usr/bin/env python3
+"""Run the Codex Glass desktop widget."""
 
-if __name__ == '__main__':
-    import sys
-    sys.exit(main())
+from codex_glass.desktop.widget import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

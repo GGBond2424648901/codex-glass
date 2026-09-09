@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -8,10 +9,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import monitor
-import web_dashboard
-from codex_monitor_core import MonitorConfig
-from codex_monitor_index import SessionIndex, SessionIndexer
+from codex_glass.cli import main as monitor
+from codex_glass.services import dashboard as web_dashboard
+from codex_glass.core.usage import MonitorConfig
+from codex_glass.storage.index import SessionIndex, SessionIndexer
 from tests.helpers import sample_records, write_jsonl
 
 
@@ -22,16 +23,33 @@ class MonitorCliTests(unittest.TestCase):
         self.root = Path(temporary.name)
 
     def test_web_and_background_forward_exact_index_options(self):
-        options = ["--sessions-dir", "sessions with spaces", "--index-db", "缓存/index.sqlite3",
-                   "--rebuild-index", "--no-index", "--config", "custom.json", "--cwd", "project",
-                   "--port", "8099", "--host", "127.0.0.2", "--no-browser"]
+        options = [
+            "--sessions-dir",
+            "sessions with spaces",
+            "--index-db",
+            "缓存/index.sqlite3",
+            "--rebuild-index",
+            "--no-index",
+            "--config",
+            "custom.json",
+            "--cwd",
+            "project",
+            "--port",
+            "8099",
+            "--host",
+            "127.0.0.2",
+            "--no-browser",
+        ]
         for mode in ("web", "background"):
-            with self.subTest(mode=mode), mock.patch.object(Path, "home", return_value=self.root), \
-                    mock.patch.object(sys, "argv", ["monitor.py", mode, *options]), \
-                    mock.patch.object(sys, "stdout", io.StringIO()), \
-                    mock.patch.object(monitor.subprocess, "run") as run, \
-                    mock.patch.object(monitor.subprocess, "Popen") as popen, \
-                    mock.patch.object(monitor, "_wait_for_server", return_value=True):
+            with (
+                self.subTest(mode=mode),
+                mock.patch.object(Path, "home", return_value=self.root),
+                mock.patch.object(sys, "argv", ["monitor.py", mode, *options]),
+                mock.patch.object(sys, "stdout", io.StringIO()),
+                mock.patch.object(monitor.subprocess, "run") as run,
+                mock.patch.object(monitor.subprocess, "Popen") as popen,
+                mock.patch.object(monitor, "_wait_for_server", return_value=True),
+            ):
                 run.return_value.returncode = 0
                 popen.return_value.pid = 12345
                 self.assertEqual(0, monitor.main())
@@ -42,6 +60,53 @@ class MonitorCliTests(unittest.TestCase):
                     self.assertEqual(options[options.index(flag) + 1], command[command.index(flag) + 1])
                 for flag in ("--rebuild-index", "--no-index", "--no-browser"):
                     self.assertEqual(1, command.count(flag))
+
+    def test_script_path_and_server_use_the_same_moved_dashboard_build(self):
+        project_root = Path(__file__).resolve().parents[1]
+        self.assertEqual(project_root / "web_dashboard.py", monitor._script_path("web_dashboard.py"))
+        self.assertEqual(web_dashboard._DASHBOARD_BUILD, monitor._local_dashboard_build())
+
+    def test_terminal_modes_keep_relative_arguments_from_unrelated_working_directory(self):
+        cases = (
+            ("simple", "codex_glass.cli.simple", []),
+            ("enhanced", "codex_glass.cli.enhanced", ["--once"]),
+        )
+        for mode, module, extra in cases:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary_directory:
+                arguments = [
+                    mode,
+                    "--sessions-dir",
+                    "relative-sessions",
+                    "--config",
+                    "relative-config.json",
+                    "--cwd",
+                    "relative-project",
+                    *extra,
+                ]
+                args = monitor.build_parser().parse_args(arguments)
+                original_cwd = Path.cwd()
+                try:
+                    os.chdir(temporary_directory)
+                    with (
+                        mock.patch.object(sys, "stdout", io.StringIO()),
+                        mock.patch.object(monitor.subprocess, "run") as run,
+                    ):
+                        run.return_value.returncode = 0
+                        function = monitor.run_simple_terminal if mode == "simple" else monitor.run_enhanced_terminal
+                        self.assertEqual(0, function(args))
+                finally:
+                    os.chdir(original_cwd)
+
+                command = run.call_args.args[0]
+                self.assertEqual([sys.executable, "-m", module], command[:3])
+                self.assertEqual("relative-sessions", command[command.index("--sessions-dir") + 1])
+                self.assertEqual("relative-config.json", command[command.index("--config") + 1])
+                self.assertEqual("relative-project", command[command.index("--cwd") + 1])
+                self.assertNotIn("cwd", run.call_args.kwargs)
+                self.assertEqual(
+                    str(Path(__file__).resolve().parents[1]),
+                    run.call_args.kwargs["env"]["PYTHONPATH"].split(os.pathsep)[0],
+                )
 
     def test_console_configuration_allows_emoji_on_gbk_streams(self):
         self.assertTrue(hasattr(monitor, "configure_console_output"))
@@ -73,18 +138,22 @@ class MonitorCliTests(unittest.TestCase):
         index, _ = self.populated_index("索引 #1.sqlite3")
         expected = index.read_state().to_payload()
         output = io.StringIO()
-        with mock.patch.object(sys, "argv", ["monitor.py", "index-status", "--index-db", str(index.path)]), \
-                mock.patch.object(sys, "stdout", output), \
-                mock.patch.object(SessionIndex, "initialize", side_effect=AssertionError("status must not initialize")), \
-                mock.patch.object(monitor, "_try_open_browser", side_effect=AssertionError("status must not browse")):
+        with (
+            mock.patch.object(sys, "argv", ["monitor.py", "index-status", "--index-db", str(index.path)]),
+            mock.patch.object(sys, "stdout", output),
+            mock.patch.object(SessionIndex, "initialize", side_effect=AssertionError("status must not initialize")),
+            mock.patch.object(monitor, "_try_open_browser", side_effect=AssertionError("status must not browse")),
+        ):
             self.assertEqual(0, monitor.main())
         self.assertEqual(expected, json.loads(output.getvalue()))
 
     def test_index_status_missing_database_emits_json_without_creating_it(self):
         path = self.root / "missing" / "index.sqlite3"
         output = io.StringIO()
-        with mock.patch.object(sys, "argv", ["monitor.py", "index-status", "--index-db", str(path)]), \
-                mock.patch.object(sys, "stdout", output):
+        with (
+            mock.patch.object(sys, "argv", ["monitor.py", "index-status", "--index-db", str(path)]),
+            mock.patch.object(sys, "stdout", output),
+        ):
             self.assertEqual(1, monitor.main())
         self.assertEqual("error", json.loads(output.getvalue())["status"])
         self.assertFalse(path.parent.exists())
@@ -106,17 +175,32 @@ class MonitorCliTests(unittest.TestCase):
 
         def server_factory(host, port, coordinator):
             server = original_create("127.0.0.1", 0, coordinator)
+
             def until_rebuilt():
                 self.assertTrue(rebuilt.wait(3))
                 raise KeyboardInterrupt
+
             server.serve_forever = until_rebuilt
             return server
 
-        with mock.patch.object(sys, "argv", ["web_dashboard.py", "--no-browser", "--sessions-dir", str(sessions),
-                                             "--index-db", str(self.root / "." / "index.sqlite3"), "--rebuild-index"]), \
-                mock.patch.object(sys, "stdout", io.StringIO()), \
-                mock.patch.object(SessionIndex, "rebuild", rebuild), \
-                mock.patch.object(web_dashboard, "create_server", side_effect=server_factory):
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "web_dashboard.py",
+                    "--no-browser",
+                    "--sessions-dir",
+                    str(sessions),
+                    "--index-db",
+                    str(self.root / "." / "index.sqlite3"),
+                    "--rebuild-index",
+                ],
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(SessionIndex, "rebuild", rebuild),
+            mock.patch.object(web_dashboard, "create_server", side_effect=server_factory),
+        ):
             web_dashboard.main()
         self.assertEqual([index.path.resolve()], calls)
         self.assertTrue(index.path.exists())
@@ -128,20 +212,37 @@ class MonitorCliTests(unittest.TestCase):
         index, sessions = self.populated_index()
         self.assertTrue(index.acquire_lease("live-writer", 60))
         original_create = web_dashboard.create_server
+
         def server_factory(host, port, coordinator):
             server = original_create("127.0.0.1", 0, coordinator)
+
             def until_error():
                 deadline = time.monotonic() + 3
                 while coordinator.snapshot()["index"]["status"] != "error" and time.monotonic() < deadline:
                     time.sleep(0.01)
                 self.assertRegex(coordinator.snapshot()["index"]["last_error"], "another.*process")
                 raise KeyboardInterrupt
+
             server.serve_forever = until_error
             return server
-        with mock.patch.object(sys, "argv", ["web_dashboard.py", "--no-browser", "--sessions-dir", str(sessions),
-                                             "--index-db", str(index.path), "--rebuild-index"]), \
-                mock.patch.object(sys, "stdout", io.StringIO()), \
-                mock.patch.object(web_dashboard, "create_server", server_factory):
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "web_dashboard.py",
+                    "--no-browser",
+                    "--sessions-dir",
+                    str(sessions),
+                    "--index-db",
+                    str(index.path),
+                    "--rebuild-index",
+                ],
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(web_dashboard, "create_server", server_factory),
+        ):
             web_dashboard.main()
         self.assertTrue(index.load_events())
         self.assertFalse(index.acquire_lease("other-writer", 60))
@@ -159,11 +260,25 @@ class MonitorCliTests(unittest.TestCase):
             server.serve_forever.side_effect = KeyboardInterrupt
             return server
 
-        with mock.patch.object(sys, "argv", ["web_dashboard.py", "--no-browser", "--sessions-dir", str(sessions),
-                                             "--index-db", str(path), "--no-index", "--rebuild-index"]), \
-                mock.patch.object(sys, "stdout", io.StringIO()), \
-                mock.patch.object(SessionIndex, "initialize", side_effect=AssertionError("no-index must not initialize")), \
-                mock.patch.object(web_dashboard, "create_server", side_effect=server_factory):
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "web_dashboard.py",
+                    "--no-browser",
+                    "--sessions-dir",
+                    str(sessions),
+                    "--index-db",
+                    str(path),
+                    "--no-index",
+                    "--rebuild-index",
+                ],
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(SessionIndex, "initialize", side_effect=AssertionError("no-index must not initialize")),
+            mock.patch.object(web_dashboard, "create_server", side_effect=server_factory),
+        ):
             web_dashboard.main()
         self.assertFalse(path.exists())
 
@@ -172,9 +287,14 @@ class MonitorCliTests(unittest.TestCase):
         target_path = self.root / "target.sqlite3"
 
         output = io.StringIO()
-        with mock.patch.object(sys, "argv", ["monitor.py", "import-index", "--source-index", str(source.path),
-                                              "--index-db", str(target_path)]), \
-                mock.patch.object(sys, "stdout", output):
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["monitor.py", "import-index", "--source-index", str(source.path), "--index-db", str(target_path)],
+            ),
+            mock.patch.object(sys, "stdout", output),
+        ):
             self.assertEqual(0, monitor.main())
         imported = json.loads(output.getvalue())
         self.assertEqual("ok", imported["status"])
@@ -182,16 +302,23 @@ class MonitorCliTests(unittest.TestCase):
         self.assertTrue(Path(imported["backup_path"]).exists())
 
         output = io.StringIO()
-        with mock.patch.object(sys, "argv", ["monitor.py", "list-imports", "--index-db", str(target_path)]), \
-                mock.patch.object(sys, "stdout", output):
+        with (
+            mock.patch.object(sys, "argv", ["monitor.py", "list-imports", "--index-db", str(target_path)]),
+            mock.patch.object(sys, "stdout", output),
+        ):
             self.assertEqual(0, monitor.main())
         listed = json.loads(output.getvalue())
         self.assertEqual(1, len(listed["sources"]))
 
         output = io.StringIO()
-        with mock.patch.object(sys, "argv", ["monitor.py", "remove-import", "--source-id", imported["source_id"],
-                                              "--index-db", str(target_path)]), \
-                mock.patch.object(sys, "stdout", output):
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["monitor.py", "remove-import", "--source-id", imported["source_id"], "--index-db", str(target_path)],
+            ),
+            mock.patch.object(sys, "stdout", output),
+        ):
             self.assertEqual(0, monitor.main())
         removed = json.loads(output.getvalue())
         self.assertEqual((1, 2), (removed["removed_files"], removed["removed_usage_events"]))
@@ -199,8 +326,10 @@ class MonitorCliTests(unittest.TestCase):
     def test_import_index_requires_source_and_does_not_create_target(self):
         target = self.root / "unused.sqlite3"
         output = io.StringIO()
-        with mock.patch.object(sys, "argv", ["monitor.py", "import-index", "--index-db", str(target)]), \
-                mock.patch.object(sys, "stdout", output):
+        with (
+            mock.patch.object(sys, "argv", ["monitor.py", "import-index", "--index-db", str(target)]),
+            mock.patch.object(sys, "stdout", output),
+        ):
             self.assertEqual(1, monitor.main())
         self.assertEqual("error", json.loads(output.getvalue())["status"])
         self.assertFalse(target.exists())

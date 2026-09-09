@@ -5,8 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-import codex_monitor_index as index_module
-from codex_monitor_core import (
+import codex_glass.storage.index as index_module
+from codex_glass.core.usage import (
     MonitorConfig,
     PricingRatesPerMillion,
     UsageDelta,

@@ -10,49 +10,59 @@ from pathlib import Path
 from unittest import mock
 from urllib.request import Request, urlopen
 
-import web_dashboard
-from codex_monitor_core import MonitorConfig
-from codex_monitor_index import IndexCoordinator, SessionIndex, SessionIndexer
+from codex_glass.services import dashboard as web_dashboard
+from codex_glass.core.usage import MonitorConfig
+from codex_glass.storage.index import IndexCoordinator, SessionIndex, SessionIndexer
 from tests.helpers import sample_records, write_jsonl
 
 
 class WebIndexingTests(unittest.TestCase):
     def test_idle_scans_reuse_history_until_clock_bucket_or_explicit_refresh(self):
-        self.coordinator.interval=.025
-        with mock.patch.object(self.index,'build_summary',wraps=self.index.build_summary) as builds:
+        self.coordinator.interval = 0.025
+        with mock.patch.object(self.index, "build_summary", wraps=self.index.build_summary) as builds:
             self.coordinator.start()
-            deadline=time.monotonic()+2
-            while time.monotonic()<deadline and builds.call_count<1:time.sleep(.01)
-            time.sleep(.15)
-            self.assertEqual(1,builds.call_count)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and builds.call_count < 1:
+                time.sleep(0.01)
+            time.sleep(0.15)
+            self.assertEqual(1, builds.call_count)
             self.coordinator.request_refresh()
-            deadline=time.monotonic()+2
-            while time.monotonic()<deadline and builds.call_count<2:time.sleep(.01)
-            self.assertEqual(2,builds.call_count)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and builds.call_count < 2:
+                time.sleep(0.01)
+            self.assertEqual(2, builds.call_count)
             self.coordinator.stop()
+
     def test_native_context_handles_unavailable_reader_and_rejects_browser_origin(self):
         from urllib.error import HTTPError
-        self.serve();self.wait_status('ready')
-        with mock.patch.object(self.index,'read_transaction',side_effect=RuntimeError('not ready')):
-            self.assertEqual(200,self.request('/api/native-context')[0])
-        for headers in ({'Origin':'https://example.com'},{'Host':'example.com'}):
+
+        self.serve()
+        self.wait_status("ready")
+        with mock.patch.object(self.index, "read_transaction", side_effect=RuntimeError("not ready")):
+            self.assertEqual(200, self.request("/api/native-context")[0])
+        for headers in ({"Origin": "https://example.com"}, {"Host": "example.com"}):
             with self.assertRaises(HTTPError) as caught:
-                urlopen(Request(self.url+'/api/native-context',headers=headers),timeout=2)
-            self.assertEqual(403,caught.exception.code)
+                urlopen(Request(self.url + "/api/native-context", headers=headers), timeout=2)
+            self.assertEqual(403, caught.exception.code)
 
     def test_native_history_filters_and_context_are_served(self):
-        self.serve();self.wait_status('ready')
-        code,data=self.request('/api/events?since=2099-01-01&models=not-a-model')
-        self.assertEqual(200,code);self.assertEqual(0,data['total'])
-        code,data=self.request('/api/native-context')
-        self.assertEqual(str(self.index.path.resolve()),data['index_path'])
-        self.assertEqual([],data['sources'])
+        self.serve()
+        self.wait_status("ready")
+        code, data = self.request("/api/events?since=2099-01-01&models=not-a-model")
+        self.assertEqual(200, code)
+        self.assertEqual(0, data["total"])
+        code, data = self.request("/api/native-context")
+        self.assertEqual(str(self.index.path.resolve()), data["index_path"])
+        self.assertEqual([], data["sources"])
 
     def test_native_invalid_history_date_returns_bad_request(self):
         from urllib.error import HTTPError
-        self.serve();self.wait_status('ready')
-        with self.assertRaises(HTTPError) as caught:self.request('/api/events?since=invalid')
-        self.assertEqual(400,caught.exception.code)
+
+        self.serve()
+        self.wait_status("ready")
+        with self.assertRaises(HTTPError) as caught:
+            self.request("/api/events?since=invalid")
+        self.assertEqual(400, caught.exception.code)
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -83,7 +93,9 @@ class WebIndexingTests(unittest.TestCase):
     def request(self, path, method="GET"):
         with urlopen(Request(self.url + path, method=method), timeout=1.5) as response:
             body = response.read()
-            return response.status, json.loads(body) if "application/json" in response.headers.get("Content-Type", "") else body
+            return response.status, (
+                json.loads(body) if "application/json" in response.headers.get("Content-Type", "") else body
+            )
 
     def wait_status(self, wanted):
         deadline = time.monotonic() + 2
@@ -124,13 +136,13 @@ class WebIndexingTests(unittest.TestCase):
 
     def test_desktop_endpoint_returns_compact_summary_without_events(self):
         self.serve()
-        self.wait_status('ready')
-        code,data=self.request('/api/widget')
-        self.assertEqual(200,code)
-        self.assertEqual(195,data['total']['total_tokens'])
-        self.assertNotIn('events',data)
-        self.assertIn('today',data['windows'])
-        self.assertEqual([],data['rate_limits']['limits'])
+        self.wait_status("ready")
+        code, data = self.request("/api/widget")
+        self.assertEqual(200, code)
+        self.assertEqual(195, data["total"]["total_tokens"])
+        self.assertNotIn("events", data)
+        self.assertIn("today", data["windows"])
+        self.assertEqual([], data["rate_limits"]["limits"])
 
     def test_refresh_returns_202_and_schedules_next_scan_without_waiting(self):
         entered, release, second = threading.Event(), threading.Event(), threading.Event()
@@ -215,9 +227,7 @@ class WebIndexingTests(unittest.TestCase):
         html = page.decode("utf-8")
 
         ambiguous_labels = [
-            label
-            for label in ("费用（美元）", "每小时花费", "令牌 · 费用", "{label: '费用'", "成本")
-            if label in html
+            label for label in ("费用（美元）", "每小时花费", "令牌 · 费用", "{label: '费用'", "成本") if label in html
         ]
         self.assertEqual(200, code)
         self.assertEqual([], ambiguous_labels)
@@ -331,13 +341,22 @@ class WebIndexingTests(unittest.TestCase):
             except BaseException as error:
                 errors.append(error)
 
-        args = ["web_dashboard.py", "--no-browser", "--sessions-dir", str(self.sessions),
-                "--config", str(self.root / "config.json")]
-        with mock.patch.object(sys, "argv", args), mock.patch.object(sys, "stdout", io.StringIO()), \
-                mock.patch.object(web_dashboard, "default_index_path", return_value=self.root / "main.sqlite3"), \
-                mock.patch.object(web_dashboard, "create_server", interrupt_server), \
-                mock.patch.object(SessionIndexer, "scan_once", blocked), \
-                mock.patch.object(SessionIndex, "close", close_after_worker):
+        args = [
+            "web_dashboard.py",
+            "--no-browser",
+            "--sessions-dir",
+            str(self.sessions),
+            "--config",
+            str(self.root / "config.json"),
+        ]
+        with (
+            mock.patch.object(sys, "argv", args),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(web_dashboard, "default_index_path", return_value=self.root / "main.sqlite3"),
+            mock.patch.object(web_dashboard, "create_server", interrupt_server),
+            mock.patch.object(SessionIndexer, "scan_once", blocked),
+            mock.patch.object(SessionIndex, "close", close_after_worker),
+        ):
             main_thread = threading.Thread(target=run_main, daemon=True)
             main_thread.start()
             try:

@@ -36,13 +36,17 @@ def _available_geometry(point):
         screen = app.primaryScreen()
     return screen.availableGeometry() if screen is not None else None
 
-def release_owned_popup(owner,popup):
+
+def release_owned_popup(owner, popup):
     """Dispose a replaced native popup without retaining its entire widget tree."""
     popup.hide()
-    retained=getattr(owner,'_glass_popup_children',[])
-    if popup in retained:retained.remove(popup)
-    try:owner.destroyed.disconnect(popup.deleteLater)
-    except (TypeError,RuntimeError):pass
+    retained = getattr(owner, "_glass_popup_children", [])
+    if popup in retained:
+        retained.remove(popup)
+    try:
+        owner.destroyed.disconnect(popup.deleteLater)
+    except (TypeError, RuntimeError):
+        pass
     popup.deleteLater()
 
 
@@ -61,20 +65,41 @@ def _clamped_position(widget, point):
 class _ChoiceCheck(QCheckBox):
     """Checkbox whose complete painted row is an activation target."""
 
-    def __init__(self,text):
+    def __init__(self, text):
         super().__init__(text)
-        font=QFont('Microsoft YaHei UI');font.setPixelSize(18);self.setFont(font);self.setMinimumHeight(44)
-    def sizeHint(self):return QSize(max(280,self.fontMetrics().horizontalAdvance(self.text())+65),44)
-    def paintEvent(self,event):
-        p=QPainter(self);p.setRenderHint(QPainter.Antialiasing)
+        font = QFont("Microsoft YaHei UI")
+        font.setPixelSize(18)
+        self.setFont(font)
+        self.setMinimumHeight(44)
+
+    def sizeHint(self):
+        return QSize(max(280, self.fontMetrics().horizontalAdvance(self.text()) + 65), 44)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
         if self.underMouse() or self.hasFocus():
-            p.setPen(Qt.NoPen);p.setBrush(QColor(218,237,255,180));p.drawRoundedRect(QRectF(self.rect()).adjusted(0,1,0,-1),10,10)
-        box=QRectF(12,(self.height()-20)/2,20,20)
-        p.setPen(QPen(QColor('#168fff' if self.isChecked() else '#8ea9ca'),1.2));p.setBrush(QColor('#168fff') if self.isChecked() else QColor(255,255,255,150));p.drawRoundedRect(box,6,6)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(218, 237, 255, 180))
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(0, 1, 0, -1), 10, 10)
+        box = QRectF(12, (self.height() - 20) / 2, 20, 20)
+        p.setPen(QPen(QColor("#168fff" if self.isChecked() else "#8ea9ca"), 1.2))
+        p.setBrush(QColor("#168fff") if self.isChecked() else QColor(255, 255, 255, 150))
+        p.drawRoundedRect(box, 6, 6)
         if self.isChecked():
-            tick=QPainterPath();tick.moveTo(box.left()+4,box.top()+10);tick.lineTo(box.left()+8,box.top()+14);tick.lineTo(box.left()+16,box.top()+6)
-            p.setPen(QPen(Qt.white,2,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin));p.drawPath(tick)
-        p.setFont(self.font());p.setPen(QColor('#102d62'));p.drawText(QRectF(46,0,self.width()-54,self.height()),Qt.AlignVCenter,p.fontMetrics().elidedText(self.text(),Qt.ElideRight,self.width()-54))
+            tick = QPainterPath()
+            tick.moveTo(box.left() + 4, box.top() + 10)
+            tick.lineTo(box.left() + 8, box.top() + 14)
+            tick.lineTo(box.left() + 16, box.top() + 6)
+            p.setPen(QPen(Qt.white, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPath(tick)
+        p.setFont(self.font())
+        p.setPen(QColor("#102d62"))
+        p.drawText(
+            QRectF(46, 0, self.width() - 54, self.height()),
+            Qt.AlignVCenter,
+            p.fontMetrics().elidedText(self.text(), Qt.ElideRight, self.width() - 54),
+        )
 
     def hitButton(self, point):
         return self.rect().contains(point)
@@ -146,7 +171,9 @@ class GlassChoicePopup(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumWidth(330)
-        popup_font=QFont('Microsoft YaHei UI');popup_font.setPixelSize(16);self.setFont(popup_font)
+        popup_font = QFont("Microsoft YaHei UI")
+        popup_font.setPixelSize(16)
+        self.setFont(popup_font)
         self.setStyleSheet(
             """
             QLabel { color: #173d73; font-family: 'Microsoft YaHei UI'; font-size: 16px; }
@@ -217,7 +244,7 @@ class GlassChoicePopup(QWidget):
             self.choices.append(choice)
             self.choice_for[option] = choice
             choice_layout.addWidget(choice)
-        self._choice_content_height = max(44, len(self.choices)*44)
+        self._choice_content_height = max(44, len(self.choices) * 44)
         self.choice_container.setMinimumHeight(self._choice_content_height)
         self.choice_scroll.setWidget(self.choice_container)
         self.choice_scroll.setFixedHeight(min(360, self._choice_content_height))

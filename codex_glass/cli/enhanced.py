@@ -27,13 +27,14 @@ try:
     from rich.layout import Layout
     from rich.text import Text
     from rich import box
+
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
     print("⚠️  Rich 库未安装，使用基础界面")
     print("   安装命令: pip install rich")
 
-from codex_monitor_core import MonitorConfig, build_usage_summary, default_codex_sessions_dir
+from codex_glass.core.usage import MonitorConfig, build_usage_summary, default_codex_sessions_dir
 
 
 def _fmt_int(n: Any) -> str:
@@ -141,13 +142,7 @@ def create_model_table(data: Dict[str, Any], top_n: int = 10) -> Table:
     rows.sort(key=lambda x: x[2], reverse=True)
 
     for model, calls, tokens, avg, cost in rows[:top_n]:
-        table.add_row(
-            model,
-            _fmt_int(calls),
-            _fmt_int(tokens),
-            f"{avg:.1f}",
-            _fmt_usd(cost)
-        )
+        table.add_row(model, _fmt_int(calls), _fmt_int(tokens), f"{avg:.1f}", _fmt_usd(cost))
 
     return table
 
@@ -172,11 +167,7 @@ def create_cwd_table(data: Dict[str, Any], top_n: int = 8) -> Table:
     rows.sort(key=lambda x: x[2], reverse=True)
 
     for cwd, calls, tokens in rows[:top_n]:
-        table.add_row(
-            cwd,
-            _fmt_int(calls),
-            _fmt_int(tokens)
-        )
+        table.add_row(cwd, _fmt_int(calls), _fmt_int(tokens))
 
     return table
 
@@ -208,11 +199,7 @@ def render_enhanced(console: Console, data: Dict[str, Any]):
     layout = Layout()
 
     # 分割布局
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="body"),
-        Layout(name="footer", size=3)
-    )
+    layout.split_column(Layout(name="header", size=3), Layout(name="body"), Layout(name="footer", size=3))
 
     # 头部
     header_text = Text()
@@ -221,25 +208,13 @@ def render_enhanced(console: Console, data: Dict[str, Any]):
     layout["header"].update(Panel(header_text, style="on blue"))
 
     # 主体
-    layout["body"].split_row(
-        Layout(name="left", ratio=1),
-        Layout(name="right", ratio=2)
-    )
+    layout["body"].split_row(Layout(name="left", ratio=1), Layout(name="right", ratio=2))
 
-    layout["left"].split_column(
-        Layout(name="summary"),
-        Layout(name="rate_limit")
-    )
+    layout["left"].split_column(Layout(name="summary"), Layout(name="rate_limit"))
 
-    layout["right"].split_column(
-        Layout(name="models"),
-        Layout(name="bottom")
-    )
+    layout["right"].split_column(Layout(name="models"), Layout(name="bottom"))
 
-    layout["bottom"].split_row(
-        Layout(name="cwd"),
-        Layout(name="recent")
-    )
+    layout["bottom"].split_row(Layout(name="cwd"), Layout(name="recent"))
 
     # 填充内容
     layout["left"]["summary"].update(create_summary_table(data))
@@ -260,9 +235,9 @@ def render_enhanced(console: Console, data: Dict[str, Any]):
 
 def render_basic(data: Dict[str, Any]):
     """基础渲染（当 Rich 不可用时）"""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("🤖 Codex Code Monitor - 终端监控")
-    print("="*80)
+    print("=" * 80)
 
     source = data.get("source", {})
     total = data.get("total", {})
@@ -277,7 +252,9 @@ def render_basic(data: Dict[str, Any]):
     print("\n📊 累计统计")
     print(f"  调用次数: { _fmt_int(total.get('calls', 0))}")
     print(f"  总令牌:   {_fmt_int(total.get('total_tokens', 0))}")
-    print(f"  输入:     {_fmt_int(total.get('input_tokens', 0))} (缓存: {_fmt_int(total.get('cached_input_tokens', 0))})")
+    print(
+        f"  输入:     {_fmt_int(total.get('input_tokens', 0))} (缓存: {_fmt_int(total.get('cached_input_tokens', 0))})"
+    )
     print(f"  输出:     {_fmt_int(total.get('output_tokens', 0))}")
     print(f"  费用:     {_fmt_usd(total.get('estimated_cost_usd', 0.0))}")
 
@@ -298,9 +275,11 @@ def render_basic(data: Dict[str, Any]):
             calls = int(stats.get("calls", 0))
             tokens = int(stats.get("total_tokens", 0))
             avg = tokens / calls if calls else 0.0
-            print(f"  - {model}: calls={calls}, tokens={_fmt_int(tokens)}, avg={avg:.1f}, cost={_fmt_usd(stats.get('estimated_cost_usd', 0.0))}")
+            print(
+                f"  - {model}: calls={calls}, tokens={_fmt_int(tokens)}, avg={avg:.1f}, cost={_fmt_usd(stats.get('estimated_cost_usd', 0.0))}"
+            )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
 
 
 def main():
@@ -344,35 +323,20 @@ def main():
                     )
 
                     layout = Layout()
-                    layout.split_column(
-                        Layout(name="header", size=3),
-                        Layout(name="body")
-                    )
+                    layout.split_column(Layout(name="header", size=3), Layout(name="body"))
 
                     header_text = Text()
                     header_text.append("🤖 Codex Code Monitor", style="bold cyan")
                     header_text.append(" - 实时监控", style="dim")
                     layout["header"].update(Panel(header_text, style="on blue"))
 
-                    layout["body"].split_row(
-                        Layout(name="left", ratio=1),
-                        Layout(name="right", ratio=2)
-                    )
+                    layout["body"].split_row(Layout(name="left", ratio=1), Layout(name="right", ratio=2))
 
-                    layout["left"].split_column(
-                        Layout(name="summary"),
-                        Layout(name="rate_limit")
-                    )
+                    layout["left"].split_column(Layout(name="summary"), Layout(name="rate_limit"))
 
-                    layout["right"].split_column(
-                        Layout(name="models"),
-                        Layout(name="bottom")
-                    )
+                    layout["right"].split_column(Layout(name="models"), Layout(name="bottom"))
 
-                    layout["bottom"].split_row(
-                        Layout(name="cwd"),
-                        Layout(name="recent")
-                    )
+                    layout["bottom"].split_row(Layout(name="cwd"), Layout(name="recent"))
 
                     layout["left"]["summary"].update(create_summary_table(data))
                     layout["left"]["rate_limit"].update(create_rate_limit_panel(data))
@@ -387,6 +351,7 @@ def main():
     else:
         try:
             import sys
+
             while True:
                 data = build_usage_summary(
                     sessions_dir=sessions_dir,

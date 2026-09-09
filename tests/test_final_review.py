@@ -16,10 +16,10 @@ from pathlib import Path
 from unittest import mock
 from urllib.request import urlopen
 
-import codex_monitor_index as indexing
-import monitor
-import web_dashboard
-from codex_monitor_core import MonitorConfig
+import codex_glass.storage.index as indexing
+from codex_glass.cli import main as monitor
+from codex_glass.services import dashboard as web_dashboard
+from codex_glass.core.usage import MonitorConfig
 from tests.helpers import sample_records, write_jsonl
 
 
@@ -93,8 +93,9 @@ class FinalReviewTests(unittest.TestCase):
         before = [dict(row) for row in self.index.load_events()]
         other_root = self.root / "other-sessions"
         write_jsonl(other_root / "two.jsonl", sample_records())
-        coordinator = indexing.IndexCoordinator(self.index, other_root, lambda: self.config, None,
-                                                interval=60, rebuild_index=True)
+        coordinator = indexing.IndexCoordinator(
+            self.index, other_root, lambda: self.config, None, interval=60, rebuild_index=True
+        )
         self.addCleanup(coordinator.stop)
         coordinator.start()
         self.wait_status(coordinator, "error")
@@ -102,7 +103,7 @@ class FinalReviewTests(unittest.TestCase):
         self.assertEqual(before, [dict(row) for row in self.index.load_events()])
 
     def test_same_size_in_place_change_uses_modification_time(self):
-        prefix = b'ignored' + b'x' * 5000 + b'\n'
+        prefix = b"ignored" + b"x" * 5000 + b"\n"
         self.log.write_bytes(prefix + self.log.read_bytes())
         self.scan()
         old = self.log.stat()
@@ -112,7 +113,7 @@ class FinalReviewTests(unittest.TestCase):
         self.assertEqual(295, sum(row["total_tokens"] for row in self.index.load_events()))
 
     def test_same_prefix_atomic_replacement_rebuilds_only_changed_file(self):
-        prefix = b'{"type":"unrelated","padding":"' + b'x' * 5000 + b'"}\n'
+        prefix = b'{"type":"unrelated","padding":"' + b"x" * 5000 + b'"}\n'
         self.log.write_bytes(prefix + self.log.read_bytes())
         untouched = self.sessions / "untouched.jsonl"
         write_jsonl(untouched, sample_records())
@@ -203,7 +204,9 @@ class FinalReviewTests(unittest.TestCase):
         try:
             tracemalloc.start()
             try:
-                with urlopen(f"http://127.0.0.1:{server.server_port}/api/events?offset=11&limit=3", timeout=2) as response:
+                with urlopen(
+                    f"http://127.0.0.1:{server.server_port}/api/events?offset=11&limit=3", timeout=2
+                ) as response:
                     result = json.loads(response.read())
                 peak = tracemalloc.get_traced_memory()[1]
             finally:
@@ -223,8 +226,10 @@ class FinalReviewTests(unittest.TestCase):
             connection.execute("INSERT INTO index_state VALUES (1, 'ready')")
             connection.commit()
         output = io.StringIO()
-        with mock.patch.object(sys, "argv", ["monitor.py", "index-status", "--index-db", str(path)]), \
-                mock.patch.object(sys, "stdout", output):
+        with (
+            mock.patch.object(sys, "argv", ["monitor.py", "index-status", "--index-db", str(path)]),
+            mock.patch.object(sys, "stdout", output),
+        ):
             self.assertEqual(1, monitor.main())
         self.assertEqual("error", json.loads(output.getvalue())["status"])
 
@@ -260,12 +265,28 @@ class FinalReviewTests(unittest.TestCase):
             except BaseException as error:
                 errors.append(error)
 
-        args = ["web_dashboard.py", "--no-browser", "--port", str(port), "--index-db", str(path),
-                "--sessions-dir", str(self.sessions), "--config", str(self.root / "config.json")]
-        patch_load = mock.patch.object(indexing.SessionIndex, "cached_summary", slow_load if blocker == "cache" else original_load)
-        with mock.patch.object(sys, "argv", args), mock.patch.object(sys, "stdout", io.StringIO()), \
-                mock.patch.object(web_dashboard, "create_server", create), patch_load, \
-                mock.patch.object(indexing.SessionIndex, "initialize", initialize):
+        args = [
+            "web_dashboard.py",
+            "--no-browser",
+            "--port",
+            str(port),
+            "--index-db",
+            str(path),
+            "--sessions-dir",
+            str(self.sessions),
+            "--config",
+            str(self.root / "config.json"),
+        ]
+        patch_load = mock.patch.object(
+            indexing.SessionIndex, "cached_summary", slow_load if blocker == "cache" else original_load
+        )
+        with (
+            mock.patch.object(sys, "argv", args),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(web_dashboard, "create_server", create),
+            patch_load,
+            mock.patch.object(indexing.SessionIndex, "initialize", initialize),
+        ):
             main_thread = threading.Thread(target=run, daemon=True)
             main_thread.start()
             try:

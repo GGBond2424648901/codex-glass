@@ -18,10 +18,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Dict, Iterable, Iterator, List, Optional, TypeVar
 
-from codex_monitor_core import (
-    MonitorConfig, PRICING_POLICY_CHECKED_ON, PRICING_POLICY_VERSION, RateLimitSnapshot, UsageDelta, UsageEvent, aggregate_usage_events,
-    estimate_cost_usd, iter_session_files, parse_timestamp_local,
-    _rate_limit_scope, _should_replace_rate_limit,
+from codex_glass.core.usage import (
+    MonitorConfig,
+    PRICING_POLICY_CHECKED_ON,
+    PRICING_POLICY_VERSION,
+    RateLimitSnapshot,
+    UsageDelta,
+    UsageEvent,
+    aggregate_usage_events,
+    estimate_cost_usd,
+    iter_session_files,
+    parse_timestamp_local,
+    _rate_limit_scope,
+    _should_replace_rate_limit,
 )
 
 
@@ -46,8 +55,14 @@ class RelevantLine:
 class _RelevantLineReader(Iterator[RelevantLine]):
     """Expose completed byte progress even when every line is irrelevant."""
 
-    def __init__(self, stream: BinaryIO, start_offset: int, probe_limit: int, chunk_size: int,
-                 checkpoint: Optional[Callable[[], None]] = None):
+    def __init__(
+        self,
+        stream: BinaryIO,
+        start_offset: int,
+        probe_limit: int,
+        chunk_size: int,
+        checkpoint: Optional[Callable[[], None]] = None,
+    ):
         if start_offset < 0 or probe_limit <= 0 or chunk_size <= 0:
             raise ValueError("offset must be nonnegative and buffer sizes must be positive")
         self.completed_offset = start_offset
@@ -109,7 +124,10 @@ class _RelevantLineReader(Iterator[RelevantLine]):
 
 
 def iter_relevant_lines(
-    stream: BinaryIO, start_offset: int, probe_limit: int = 65536, chunk_size: int = 1048576,
+    stream: BinaryIO,
+    start_offset: int,
+    probe_limit: int = 65536,
+    chunk_size: int = 1048576,
     checkpoint: Optional[Callable[[], None]] = None,
 ) -> _RelevantLineReader:
     """Stream complete compact-JSON records; never retain an irrelevant line.
@@ -197,12 +215,18 @@ def _sanitized_error(error: object) -> str:
 
 def summary_cache_key(config: MonitorConfig, cwd_filter: Optional[str], include_events: bool) -> str:
     """Hash only configuration inputs that affect the public summary."""
-    payload = {"pricing": {model: asdict(rates) for model, rates in config.pricing_per_million.items()},
-               "aliases": config.model_aliases, "pricing_policy": PRICING_POLICY_VERSION,
-               "pricing_policy_checked_on": PRICING_POLICY_CHECKED_ON,
-               "summary_format": SUMMARY_FORMAT_VERSION,
-               "cwd_filter": cwd_filter, "include_events": include_events}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    payload = {
+        "pricing": {model: asdict(rates) for model, rates in config.pricing_per_million.items()},
+        "aliases": config.model_aliases,
+        "pricing_policy": PRICING_POLICY_VERSION,
+        "pricing_policy_checked_on": PRICING_POLICY_CHECKED_ON,
+        "summary_format": SUMMARY_FORMAT_VERSION,
+        "cwd_filter": cwd_filter,
+        "include_events": include_events,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    ).hexdigest()
 
 
 def default_index_path() -> Path:
@@ -266,6 +290,7 @@ class SessionIndex:
 
     def rebuild(self) -> None:
         """Clear scanner-owned data while retaining imported external history."""
+
         def clear(connection: sqlite3.Connection) -> None:
             connection.execute("DELETE FROM summary_cache")
             connection.execute("DELETE FROM session_files")
@@ -345,8 +370,19 @@ class SessionIndex:
     def _status_from_row(row: sqlite3.Row) -> IndexStatus:
         if row is None:
             raise RuntimeError("SessionIndex has not been initialized")
-        required = {"status", "complete", "total_files", "processed_files", "total_bytes", "processed_bytes",
-                    "current_file", "last_error", "started_at", "completed_at", "updated_at"}
+        required = {
+            "status",
+            "complete",
+            "total_files",
+            "processed_files",
+            "total_bytes",
+            "processed_bytes",
+            "current_file",
+            "last_error",
+            "started_at",
+            "completed_at",
+            "updated_at",
+        }
         if not required <= set(row.keys()):
             raise IncompatibleIndexError("Index state schema is incomplete; rebuild required (see README recovery)")
         return IndexStatus(
@@ -364,8 +400,9 @@ class SessionIndex:
             failed_files=int(row["failed_files"]) if "failed_files" in row.keys() else 0,
         )
 
-    def cached_summary(self, config: MonitorConfig, cwd_filter: Optional[str] = None,
-                       include_events: bool = False) -> Optional[Dict[str, Any]]:
+    def cached_summary(
+        self, config: MonitorConfig, cwd_filter: Optional[str] = None, include_events: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """Load the last published result without reading the event corpus."""
         with self.read_transaction() as reader:
             row = reader.execute(
@@ -374,9 +411,14 @@ class SessionIndex:
             ).fetchone()
         return json.loads(row["payload_json"]) if row else None
 
-    def build_summary(self, config: MonitorConfig, now: Optional[datetime] = None,
-                      include_events: bool = False, cwd_filter: Optional[str] = None,
-                      compact_events: bool = False) -> Dict[str, Any]:
+    def build_summary(
+        self,
+        config: MonitorConfig,
+        now: Optional[datetime] = None,
+        include_events: bool = False,
+        cwd_filter: Optional[str] = None,
+        compact_events: bool = False,
+    ) -> Dict[str, Any]:
         """Aggregate one committed generation using current prices and clock."""
         current_time = now or datetime.now()
         config_key = summary_cache_key(config, cwd_filter, include_events)
@@ -385,7 +427,9 @@ class SessionIndex:
             status = self._status_from_row(state_row)
             generation = int(state_row["generation"])
             key = hashlib.sha256(f"{config_key}:{generation}".encode()).hexdigest()
-            cached = reader.execute("SELECT payload_json, as_of FROM summary_cache WHERE cache_key=?", (key,)).fetchone()
+            cached = reader.execute(
+                "SELECT payload_json, as_of FROM summary_cache WHERE cache_key=?", (key,)
+            ).fetchone()
             if not compact_events and cached and cached["as_of"] == current_time.isoformat():
                 result = json.loads(cached["payload_json"])
                 result["index"] = status.to_payload()
@@ -394,22 +438,35 @@ class SessionIndex:
             # pathlib ordering is platform-specific (case-insensitive on
             # Windows). Use the same ordering as legacy iter_session_files for
             # equal timestamps and limit ties, including after later discovery.
-            paths = {row[0] for row in reader.execute("SELECT path FROM session_files UNION SELECT source_path FROM imported_session_files")}
-            path_objects = {path:Path(path) for path in paths}
-            ranks = {path:position for position,path in enumerate(sorted(path_objects.values()))}
-            path_order = {path:ranks[obj] for path,obj in path_objects.items()}
-            interned={}
+            paths = {
+                row[0]
+                for row in reader.execute(
+                    "SELECT path FROM session_files UNION SELECT source_path FROM imported_session_files"
+                )
+            }
+            path_objects = {path: Path(path) for path in paths}
+            ranks = {path: position for position, path in enumerate(sorted(path_objects.values()))}
+            path_order = {path: ranks[obj] for path, obj in path_objects.items()}
+            interned = {}
+
             def shared(value):
-                if value not in interned:interned[value]=value
+                if value not in interned:
+                    interned[value] = value
                 return interned[value]
-            session_keys={}
+
+            session_keys = {}
+
             def stable_session_for(row):
-                key=(row['session_path'],row['session_head_hash'])
-                if key not in session_keys:session_keys[key]=session_key(*key)
+                key = (row["session_path"], row["session_head_hash"])
+                if key not in session_keys:
+                    session_keys[key] = session_key(*key)
                 return session_keys[key]
-            reader.create_collation("session_path", lambda left, right:
-                                    (path_order[left] > path_order[right]) - (path_order[left] < path_order[right]))
-            from codex_monitor_import import rate_limit_key, session_key, usage_event_key
+
+            reader.create_collation(
+                "session_path",
+                lambda left, right: (path_order[left] > path_order[right]) - (path_order[left] < path_order[right]),
+            )
+            from codex_glass.storage.history_import import rate_limit_key, session_key, usage_event_key
 
             event_rows = []
             local_event_keys = set()
@@ -418,19 +475,48 @@ class SessionIndex:
                      FROM usage_events e JOIN session_files f ON e.file_id=f.file_id
                    ORDER BY e.occurred_at, f.path COLLATE session_path, e.source_offset"""
             ):
-                delta = UsageDelta(*(int(row[name]) for name in (
-                    "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")))
+                delta = UsageDelta(
+                    *(
+                        int(row[name])
+                        for name in (
+                            "input_tokens",
+                            "cached_input_tokens",
+                            "output_tokens",
+                            "reasoning_output_tokens",
+                            "total_tokens",
+                        )
+                    )
+                )
                 stable_session = stable_session_for(row)
                 stable_event = usage_event_key(
-                    stable_session, row["source_offset"], row["occurred_at"], row["model"], row["cwd"],
-                    row["input_tokens"], row["cached_input_tokens"], row["output_tokens"],
-                    row["reasoning_output_tokens"], row["total_tokens"],
+                    stable_session,
+                    row["source_offset"],
+                    row["occurred_at"],
+                    row["model"],
+                    row["cwd"],
+                    row["input_tokens"],
+                    row["cached_input_tokens"],
+                    row["output_tokens"],
+                    row["reasoning_output_tokens"],
+                    row["total_tokens"],
                 )
                 local_event_keys.add(stable_event)
-                event_rows.append((datetime.fromisoformat(row["occurred_at"]), 0, shared(row["session_path"]),
-                                   int(row["source_offset"]), UsageEvent(
-                                       datetime.fromisoformat(row["occurred_at"]), shared(row["model"] or "unknown"),
-                                       shared(row["cwd"]), delta, 0.0, shared(row["pricing_source"] or "default"))))
+                event_rows.append(
+                    (
+                        datetime.fromisoformat(row["occurred_at"]),
+                        0,
+                        shared(row["session_path"]),
+                        int(row["source_offset"]),
+                        UsageEvent(
+                            datetime.fromisoformat(row["occurred_at"]),
+                            shared(row["model"] or "unknown"),
+                            shared(row["cwd"]),
+                            delta,
+                            0.0,
+                            shared(row["pricing_source"] or "default"),
+                        ),
+                    )
+                )
             imported_event_keys = set()
             for row in reader.execute(
                 """SELECT e.*, f.source_path AS session_path
@@ -442,12 +528,35 @@ class SessionIndex:
                 if row["event_key"] in local_event_keys or row["event_key"] in imported_event_keys:
                     continue
                 imported_event_keys.add(row["event_key"])
-                delta = UsageDelta(*(int(row[name]) for name in (
-                    "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")))
+                delta = UsageDelta(
+                    *(
+                        int(row[name])
+                        for name in (
+                            "input_tokens",
+                            "cached_input_tokens",
+                            "output_tokens",
+                            "reasoning_output_tokens",
+                            "total_tokens",
+                        )
+                    )
+                )
                 occurred = datetime.fromisoformat(row["occurred_at"])
-                event_rows.append((occurred, 1, shared(row["session_path"]), int(row["source_offset"]), UsageEvent(
-                    occurred, shared(row["model"] or "unknown"), shared(row["cwd"]), delta, 0.0,
-                    shared(row["pricing_source"] or "default"))))
+                event_rows.append(
+                    (
+                        occurred,
+                        1,
+                        shared(row["session_path"]),
+                        int(row["source_offset"]),
+                        UsageEvent(
+                            occurred,
+                            shared(row["model"] or "unknown"),
+                            shared(row["cwd"]),
+                            delta,
+                            0.0,
+                            shared(row["pricing_source"] or "default"),
+                        ),
+                    )
+                )
             event_rows.sort(key=lambda item: (item[0], path_order[item[2]], item[1], item[3]))
             events = [item[4] for item in event_rows]
             del event_rows, local_event_keys, imported_event_keys
@@ -461,13 +570,22 @@ class SessionIndex:
             ):
                 stable_session = stable_session_for(row)
                 stable_rate = rate_limit_key(
-                    stable_session, row["source_offset"], row["limit_id"], row["limit_name"], row["observed_at"],
-                    row["used_percent"], row["window_minutes"], row["resets_at"], row["resets_in_seconds"],
+                    stable_session,
+                    row["source_offset"],
+                    row["limit_id"],
+                    row["limit_name"],
+                    row["observed_at"],
+                    row["used_percent"],
+                    row["window_minutes"],
+                    row["resets_at"],
+                    row["resets_in_seconds"],
                 )
                 local_rate_keys.add(stable_rate)
                 snapshot = RateLimitSnapshot(
-                    limit_id=row["limit_id"], limit_name=row["limit_name"],
-                    observed_at=datetime.fromisoformat(row["observed_at"]), used_percent=row["used_percent"],
+                    limit_id=row["limit_id"],
+                    limit_name=row["limit_name"],
+                    observed_at=datetime.fromisoformat(row["observed_at"]),
+                    used_percent=row["used_percent"],
                     window_minutes=row["window_minutes"],
                     resets_at=datetime.fromisoformat(row["resets_at"]) if row["resets_at"] else None,
                     resets_in_seconds=row["resets_in_seconds"],
@@ -488,8 +606,10 @@ class SessionIndex:
                     continue
                 imported_rate_keys.add(row["snapshot_key"])
                 snapshot = RateLimitSnapshot(
-                    limit_id=row["limit_id"], limit_name=row["limit_name"],
-                    observed_at=datetime.fromisoformat(row["observed_at"]), used_percent=row["used_percent"],
+                    limit_id=row["limit_id"],
+                    limit_name=row["limit_name"],
+                    observed_at=datetime.fromisoformat(row["observed_at"]),
+                    used_percent=row["used_percent"],
                     window_minutes=row["window_minutes"],
                     resets_at=datetime.fromisoformat(row["resets_at"]) if row["resets_at"] else None,
                     resets_in_seconds=row["resets_in_seconds"],
@@ -499,11 +619,21 @@ class SessionIndex:
                 if _should_replace_rate_limit(snapshots.get(scope), snapshot):
                     snapshots[scope] = snapshot
             # The legacy parser contributes one selected snapshot per source file.
-            selected = [snapshots["codex"] if "codex" in snapshots else max(
-                snapshots.values(), key=lambda item: (
-                    1 if _rate_limit_scope(item) == "global" else 0,
-                    item.used_percent or 0.0, item.observed_at or datetime.min))
-                for snapshots in by_session.values()]
+            selected = [
+                (
+                    snapshots["codex"]
+                    if "codex" in snapshots
+                    else max(
+                        snapshots.values(),
+                        key=lambda item: (
+                            1 if _rate_limit_scope(item) == "global" else 0,
+                            item.used_percent or 0.0,
+                            item.observed_at or datetime.min,
+                        ),
+                    )
+                )
+                for snapshots in by_session.values()
+            ]
             local_files = reader.execute("SELECT COUNT(*) FROM session_files").fetchone()[0]
             import_counts = reader.execute(
                 """SELECT
@@ -513,23 +643,34 @@ class SessionIndex:
                        (SELECT COUNT(DISTINCT snapshot_key) FROM imported_rate_limit_snapshots)"""
             ).fetchone()
         del local_rate_keys, imported_rate_keys, by_session
-        from compact_history import CompactHistory
+        from codex_glass.storage.compact import CompactHistory
+
         history = CompactHistory() if compact_events else None
-        result = aggregate_usage_events(events, selected, config, now=current_time, include_events=include_events,
-                                        event_sink=history.append if history is not None else None,
-                                        source_metadata={"files": local_files}, cwd_filter=cwd_filter)
+        result = aggregate_usage_events(
+            events,
+            selected,
+            config,
+            now=current_time,
+            include_events=include_events,
+            event_sink=history.append if history is not None else None,
+            source_metadata={"files": local_files},
+            cwd_filter=cwd_filter,
+        )
         del events
         if import_counts[0]:
-            result["source"].update({
-                "imported_sources": int(import_counts[0]),
-                "imported_files": int(import_counts[1]),
-                "imported_usage_events": int(import_counts[2]),
-                "imported_rate_limit_snapshots": int(import_counts[3]),
-            })
+            result["source"].update(
+                {
+                    "imported_sources": int(import_counts[0]),
+                    "imported_files": int(import_counts[1]),
+                    "imported_usage_events": int(import_counts[2]),
+                    "imported_rate_limit_snapshots": int(import_counts[3]),
+                }
+            )
         result["index"] = status.to_payload()
         result["index"]["generation"] = generation
         payload = json.dumps(result, ensure_ascii=True, separators=(",", ":"))
-        if history is not None:result['_history']=history
+        if history is not None:
+            result["_history"] = history
         with self.write_transaction() as writer:
             if writer.execute("SELECT generation FROM index_state WHERE singleton_id=1").fetchone()[0] != generation:
                 return result
@@ -537,11 +678,14 @@ class SessionIndex:
             writer.execute("DELETE FROM summary_cache WHERE config_key=?", (config_key,))
             writer.execute(
                 """INSERT INTO summary_cache(cache_key, payload_json, created_at, config_key, as_of)
-                   VALUES (?, ?, ?, ?, ?)""", (key, payload, time.time(), config_key, current_time.isoformat()))
+                   VALUES (?, ?, ?, ?, ?)""",
+                (key, payload, time.time(), config_key, current_time.isoformat()),
+            )
         return result
 
     def acquire_lease(self, owner: str, ttl_seconds: int) -> bool:
         """Atomically acquire the cross-process indexing lease when it is available."""
+
         def acquire(connection: sqlite3.Connection) -> bool:
             now = time.time()
             expires_at = now + max(0, int(ttl_seconds))
@@ -638,7 +782,9 @@ class SessionIndex:
 
     @staticmethod
     def _validate_lease(connection: sqlite3.Connection, owner: str) -> None:
-        row = connection.execute("SELECT lease_owner, lease_expires_at FROM index_state WHERE singleton_id=1").fetchone()
+        row = connection.execute(
+            "SELECT lease_owner, lease_expires_at FROM index_state WHERE singleton_id=1"
+        ).fetchone()
         if row is None or row[0] != owner or row[1] is None or row[1] <= time.time():
             raise LostLeaseError("Indexing lease expired or was acquired by another process; batch rolled back")
 
@@ -719,7 +865,9 @@ class SessionIndex:
                 required = {row[1] for row in reference.execute(f"PRAGMA table_info({table})")}
                 present = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
                 if not required <= present:
-                    raise IncompatibleIndexError(f"Index table {table} is incomplete; rebuild required (see README recovery)")
+                    raise IncompatibleIndexError(
+                        f"Index table {table} is incomplete; rebuild required (see README recovery)"
+                    )
             if connection.execute("SELECT 1 FROM index_state WHERE singleton_id=1").fetchone() is None:
                 raise IncompatibleIndexError("Index state row is missing; rebuild required (see README recovery)")
         finally:
@@ -728,19 +876,25 @@ class SessionIndex:
     @staticmethod
     def _ensure_summary_schema(connection: sqlite3.Connection) -> None:
         """Add compatible cache metadata to indexes created before summaries existed."""
-        from codex_monitor_import import ensure_import_schema
+        from codex_glass.storage.history_import import ensure_import_schema
 
-        extensions = {"index_state": {"generation": "INTEGER NOT NULL DEFAULT 0", "sessions_root": "TEXT",
-                                      "failed_files": "INTEGER NOT NULL DEFAULT 0"},
-                      "session_files": {"file_identity": "TEXT NOT NULL DEFAULT ''",
-                                        "read_failed": "INTEGER NOT NULL DEFAULT 0"},
-                      "summary_cache": {"config_key": "TEXT NOT NULL DEFAULT ''", "as_of": "TEXT NOT NULL DEFAULT ''"}}
+        extensions = {
+            "index_state": {
+                "generation": "INTEGER NOT NULL DEFAULT 0",
+                "sessions_root": "TEXT",
+                "failed_files": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "session_files": {"file_identity": "TEXT NOT NULL DEFAULT ''", "read_failed": "INTEGER NOT NULL DEFAULT 0"},
+            "summary_cache": {"config_key": "TEXT NOT NULL DEFAULT ''", "as_of": "TEXT NOT NULL DEFAULT ''"},
+        }
         for table, fields in extensions.items():
             present = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             for name, definition in fields.items():
                 if name not in present:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
-        connection.execute("CREATE INDEX IF NOT EXISTS summary_cache_config_idx ON summary_cache(config_key, created_at)")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS summary_cache_config_idx ON summary_cache(config_key, created_at)"
+        )
         connection.execute(
             """CREATE TABLE IF NOT EXISTS quota_cache (
                    file_id INTEGER PRIMARY KEY REFERENCES session_files(file_id) ON DELETE CASCADE,
@@ -750,14 +904,17 @@ class SessionIndex:
                    created_at REAL NOT NULL
                )"""
         )
-        connection.execute("CREATE INDEX IF NOT EXISTS quota_cache_observed_idx ON quota_cache(observed_at, source_offset)")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS quota_cache_observed_idx ON quota_cache(observed_at, source_offset)"
+        )
         ensure_import_schema(connection)
         for table in ("usage_events", "rate_limit_snapshots", "session_files"):
-            for operation in (("INSERT", "DELETE") if table == "session_files" else ("INSERT", "UPDATE", "DELETE")):
+            for operation in ("INSERT", "DELETE") if table == "session_files" else ("INSERT", "UPDATE", "DELETE"):
                 connection.execute(
                     f"""CREATE TRIGGER IF NOT EXISTS {table}_{operation.lower()}_generation
                         AFTER {operation} ON {table} BEGIN
-                        UPDATE index_state SET generation=generation+1 WHERE singleton_id=1; END""")
+                        UPDATE index_state SET generation=generation+1 WHERE singleton_id=1; END"""
+                )
 
     @staticmethod
     def _canonical_path(path: Path) -> str:
@@ -822,9 +979,7 @@ class SessionIndexer:
     def _write_transaction(self):
         return self.index.write_transaction(expected_owner=self._owner)
 
-    def scan_once(
-        self, sessions_dir: Path, progress: Optional[Callable[[IndexStatus], None]] = None
-    ) -> IndexStatus:
+    def scan_once(self, sessions_dir: Path, progress: Optional[Callable[[IndexStatus], None]] = None) -> IndexStatus:
         with self.index.indexing_lease(self._owner) as owner:
             previous_owner = self._owner
             self._owner = owner
@@ -843,8 +998,9 @@ class SessionIndexer:
                 sizes[path] = path.stat().st_size
             except OSError:
                 sizes[path] = 0
-        status = IndexStatus("indexing", False, len(files), 0, sum(sizes.values()), 0,
-                             None, None, started, None, started)
+        status = IndexStatus(
+            "indexing", False, len(files), 0, sum(sizes.values()), 0, None, None, started, None, started
+        )
 
         def publish(**changes):
             nonlocal status
@@ -854,9 +1010,20 @@ class SessionIndexer:
                     """UPDATE index_state SET status=?, complete=?, total_files=?, processed_files=?,
                        total_bytes=?, processed_bytes=?, current_file=?, last_error=?, started_at=?,
                        completed_at=?, updated_at=?, failed_files=? WHERE singleton_id=1""",
-                    (status.status, status.complete, status.total_files, status.processed_files,
-                     status.total_bytes, status.processed_bytes, status.current_file, status.last_error,
-                     status.started_at, status.completed_at, status.updated_at, status.failed_files),
+                    (
+                        status.status,
+                        status.complete,
+                        status.total_files,
+                        status.processed_files,
+                        status.total_bytes,
+                        status.processed_bytes,
+                        status.current_file,
+                        status.last_error,
+                        status.started_at,
+                        status.completed_at,
+                        status.updated_at,
+                        status.failed_files,
+                    ),
                 )
             if progress is not None:
                 progress(status)
@@ -867,14 +1034,17 @@ class SessionIndexer:
         with self._write_transaction() as connection:
             for row in connection.execute("SELECT file_id, path FROM session_files").fetchall():
                 if Path(row["path"]).is_relative_to(root) and row["path"] not in discovered:
-                    connection.execute("UPDATE session_files SET missing=1, updated_at=? WHERE file_id=?",
-                                       (time.time(), row["file_id"]))
+                    connection.execute(
+                        "UPDATE session_files SET missing=1, updated_at=? WHERE file_id=?",
+                        (time.time(), row["file_id"]),
+                    )
         processed = 0
         completed_files = 0
         read_error = None
         renew_at = time.monotonic() + _LEASE_TTL_SECONDS / 3
         for number, path in enumerate(files):
             publish(current_file=str(path))
+
             def batch_progress(offset):
                 nonlocal renew_at
                 if time.monotonic() >= renew_at:
@@ -882,6 +1052,7 @@ class SessionIndexer:
                         raise LostLeaseError("Indexing lease lost during scan")
                     renew_at = time.monotonic() + _LEASE_TTL_SECONDS / 3
                 publish(processed_bytes=processed + min(offset, sizes[path]))
+
             try:
                 changed, error = self._scan_file(path, batch_progress)
                 if error:
@@ -896,14 +1067,20 @@ class SessionIndexer:
                 self._record_file_error(path, error)
                 state = self.index.get_file_state(path)
                 processed += min(state.offset, sizes[path])
-                read_error = "Unreadable session file; check permissions/availability; will retry. " + _sanitized_error(error)
+                read_error = "Unreadable session file; check permissions/availability; will retry. " + _sanitized_error(
+                    error
+                )
                 publish(last_error=read_error, failed_files=status.failed_files + 1)
             publish(processed_files=completed_files, processed_bytes=processed)
         self._backfill_legacy_quota()
         complete = completed_files == len(files) and status.failed_files == 0
-        publish(status="ready" if complete else ("error" if status.failed_files else "indexing"),
-                complete=complete, current_file=None, completed_at=time.time() if complete else None,
-                last_error=read_error or status.last_error)
+        publish(
+            status="ready" if complete else ("error" if status.failed_files else "indexing"),
+            complete=complete,
+            current_file=None,
+            completed_at=time.time() if complete else None,
+            last_error=read_error or status.last_error,
+        )
         return status
 
     def _ensure_file(self, path: Path) -> FileState:
@@ -920,7 +1097,13 @@ class SessionIndexer:
         with self._write_transaction() as connection:
             connection.execute(
                 "UPDATE session_files SET missing=?, error=?, read_failed=1, updated_at=?, last_scanned_at=? WHERE file_id=?",
-                (isinstance(error, FileNotFoundError), _sanitized_error(error), time.time(), time.time(), state.file_id),
+                (
+                    isinstance(error, FileNotFoundError),
+                    _sanitized_error(error),
+                    time.time(),
+                    time.time(),
+                    state.file_id,
+                ),
             )
 
     def _scan_file(self, path: Path, progress: Callable[[int], None]):
@@ -930,17 +1113,28 @@ class SessionIndexer:
             head = stream.read(min(4096, stat.st_size))
             head_hash = hashlib.sha256(head).hexdigest()
             # For a short growing file compare only bytes covered by the old hash.
-            old_prefix_hash = hashlib.sha256(head[:min(state.size, 4096)]).hexdigest()
+            old_prefix_hash = hashlib.sha256(head[: min(state.size, 4096)]).hexdigest()
             identity = self._file_identity(stat)
-            reset = (stat.st_size < state.size or
-                     (state.head_hash and old_prefix_hash != state.head_hash) or
-                     (state.file_identity and identity and state.file_identity != identity) or
-                     (state.head_hash and stat.st_size == state.size and stat.st_mtime_ns != state.mtime_ns))
-            parser = _ParserState() if reset else _ParserState(
-                state.last_model or "unknown", state.last_cwd,
-                UsageDelta(state.previous_input_tokens, state.previous_cached_input_tokens,
-                           state.previous_output_tokens, state.previous_reasoning_output_tokens,
-                           state.previous_total_tokens),
+            reset = (
+                stat.st_size < state.size
+                or (state.head_hash and old_prefix_hash != state.head_hash)
+                or (state.file_identity and identity and state.file_identity != identity)
+                or (state.head_hash and stat.st_size == state.size and stat.st_mtime_ns != state.mtime_ns)
+            )
+            parser = (
+                _ParserState()
+                if reset
+                else _ParserState(
+                    state.last_model or "unknown",
+                    state.last_cwd,
+                    UsageDelta(
+                        state.previous_input_tokens,
+                        state.previous_cached_input_tokens,
+                        state.previous_output_tokens,
+                        state.previous_reasoning_output_tokens,
+                        state.previous_total_tokens,
+                    ),
+                )
             )
             offset = 0 if reset else state.offset
             changed = bool(reset or not state.head_hash or stat.st_size != state.size or offset < stat.st_size)
@@ -987,7 +1181,8 @@ class SessionIndexer:
                     connection.executemany(
                         """INSERT OR IGNORE INTO rate_limit_snapshots(file_id, source_offset, limit_id, limit_name,
                            observed_at, used_percent, window_minutes, resets_at, resets_in_seconds, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", snapshots,
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        snapshots,
                     )
                     for quota in quotas:
                         connection.execute(
@@ -1000,8 +1195,9 @@ class SessionIndexer:
                                    (excluded.observed_at = quota_cache.observed_at AND excluded.source_offset >= quota_cache.source_offset)""",
                             quota,
                         )
-                    self._save_cursor(connection, state.file_id, stat, head_hash,
-                                      reader.completed_offset, parser, error)
+                    self._save_cursor(
+                        connection, state.file_id, stat, head_hash, reader.completed_offset, parser, error
+                    )
                 events.clear()
                 snapshots.clear()
                 quotas.clear()
@@ -1049,10 +1245,24 @@ class SessionIndexer:
                previous_input_tokens=?, previous_cached_input_tokens=?, previous_output_tokens=?,
                previous_reasoning_output_tokens=?, previous_total_tokens=?, missing=0, error=?,
                updated_at=?, last_scanned_at=?, file_identity=?, read_failed=0 WHERE file_id=?""",
-            (stat.st_size, stat.st_mtime_ns, head_hash, offset, parser.model, parser.cwd,
-             previous.input_tokens, previous.cached_input_tokens, previous.output_tokens,
-             previous.reasoning_output_tokens, previous.total_tokens, error, now, now,
-             SessionIndexer._file_identity(stat), file_id),
+            (
+                stat.st_size,
+                stat.st_mtime_ns,
+                head_hash,
+                offset,
+                parser.model,
+                parser.cwd,
+                previous.input_tokens,
+                previous.cached_input_tokens,
+                previous.output_tokens,
+                previous.reasoning_output_tokens,
+                previous.total_tokens,
+                error,
+                now,
+                now,
+                SessionIndexer._file_identity(stat),
+                file_id,
+            ),
         )
 
     def _parse_line(self, line: RelevantLine, parser: _ParserState, file_id: int):
@@ -1083,14 +1293,27 @@ class SessionIndexer:
         rate_limits = payload.get("rate_limits")
         if isinstance(rate_limits, dict):
             snapshot = RateLimitSnapshot.from_payload(timestamp, rate_limits)
-            snapshot_row = (file_id, line.source_offset, snapshot.limit_id, snapshot.limit_name, observed,
-                            snapshot.used_percent, snapshot.window_minutes,
-                            snapshot.resets_at.isoformat() if snapshot.resets_at else None,
-                            snapshot.resets_in_seconds, now)
+            snapshot_row = (
+                file_id,
+                line.source_offset,
+                snapshot.limit_id,
+                snapshot.limit_name,
+                observed,
+                snapshot.used_percent,
+                snapshot.window_minutes,
+                snapshot.resets_at.isoformat() if snapshot.resets_at else None,
+                snapshot.resets_in_seconds,
+                now,
+            )
             quota_payload = self._sanitize_quota_payload(timestamp, rate_limits)
             if quota_payload is not None:
-                quota_row = (file_id, line.source_offset, observed,
-                             json.dumps(quota_payload, ensure_ascii=True, separators=(",", ":")), now)
+                quota_row = (
+                    file_id,
+                    line.source_offset,
+                    observed,
+                    json.dumps(quota_payload, ensure_ascii=True, separators=(",", ":")),
+                    now,
+                )
         info = payload.get("info")
         total_usage = info.get("total_token_usage") if isinstance(info, dict) else None
         if not isinstance(total_usage, dict):
@@ -1103,9 +1326,20 @@ class SessionIndexer:
         if delta.total_tokens <= 0:
             return None, snapshot_row, quota_row
         _, pricing_source = estimate_cost_usd(parser.model, delta, self.config)
-        event = (file_id, line.source_offset, observed, parser.model, parser.cwd, delta.input_tokens,
-                 delta.cached_input_tokens, delta.output_tokens, delta.reasoning_output_tokens,
-                 delta.total_tokens, pricing_source, now)
+        event = (
+            file_id,
+            line.source_offset,
+            observed,
+            parser.model,
+            parser.cwd,
+            delta.input_tokens,
+            delta.cached_input_tokens,
+            delta.output_tokens,
+            delta.reasoning_output_tokens,
+            delta.total_tokens,
+            pricing_source,
+            now,
+        )
         return event, snapshot_row, quota_row
 
     @staticmethod
@@ -1121,12 +1355,18 @@ class SessionIndexer:
             if not isinstance(raw, dict):
                 continue
             snapshot = RateLimitSnapshot.from_payload(observed, {**rate_limits, "primary": raw})
-            if (snapshot.used_percent is None or not math.isfinite(float(snapshot.used_percent)) or
-                    snapshot.window_minutes not in (300, 10080)):
+            if (
+                snapshot.used_percent is None
+                or not math.isfinite(float(snapshot.used_percent))
+                or snapshot.window_minutes not in (300, 10080)
+            ):
                 continue
             window = {
-                "scope": "global", "limit_id": "codex", "observed_at": observed.isoformat(),
-                "used_percent": snapshot.used_percent, "window_minutes": snapshot.window_minutes,
+                "scope": "global",
+                "limit_id": "codex",
+                "observed_at": observed.isoformat(),
+                "used_percent": snapshot.used_percent,
+                "window_minutes": snapshot.window_minutes,
                 "resets_at": snapshot.resets_at.isoformat() if snapshot.resets_at else None,
             }
             windows[name] = window
@@ -1140,8 +1380,13 @@ class SessionIndexer:
             windows = {name: window for name, window in windows.items() if window.get("window_minutes") == 10080}
             if not limits:
                 return None
-        return {"primary": windows.get("primary"), "secondary": windows.get("secondary"),
-                "limits": limits, "plan_type": plan, "observed_at": observed.isoformat()}
+        return {
+            "primary": windows.get("primary"),
+            "secondary": windows.get("secondary"),
+            "limits": limits,
+            "plan_type": plan,
+            "observed_at": observed.isoformat(),
+        }
 
     def _backfill_legacy_quota(self) -> None:
         """Try at most 16 indexed observations, reading no more than 1 MiB each."""
@@ -1174,8 +1419,13 @@ class SessionIndexer:
                     writer.execute(
                         """INSERT OR REPLACE INTO quota_cache(file_id,source_offset,observed_at,payload_json,created_at)
                            VALUES (?,?,?,?,?)""",
-                        (row["file_id"], row["source_offset"], row["observed_at"],
-                         json.dumps(quota, ensure_ascii=True, separators=(",", ":")), time.time()),
+                        (
+                            row["file_id"],
+                            row["source_offset"],
+                            row["observed_at"],
+                            json.dumps(quota, ensure_ascii=True, separators=(",", ":")),
+                            time.time(),
+                        ),
                     )
                 return
             except (OSError, ValueError, TypeError, AttributeError, UnicodeError, RecursionError):
@@ -1186,10 +1436,20 @@ class _StopIndexing(Exception):
     """Unwind a scan at a committed progress checkpoint during shutdown."""
 
 
-def history_page(events: Iterable[Dict[str, Any]], error: Optional[str], offset: int = 0,
-                 limit: int = 200, q: str = "", model: str = "", cwd: str = "",
-                 since: str = "", until: str = "", models=None, sort: str = "timestamp",
-                 descending: bool = True) -> Dict[str, Any]:
+def history_page(
+    events: Iterable[Dict[str, Any]],
+    error: Optional[str],
+    offset: int = 0,
+    limit: int = 200,
+    q: str = "",
+    model: str = "",
+    cwd: str = "",
+    since: str = "",
+    until: str = "",
+    models=None,
+    sort: str = "timestamp",
+    descending: bool = True,
+) -> Dict[str, Any]:
     """Filter immutable published history with O(page size) request memory.
 
     The worker owns the complete normalized history. A request retains that
@@ -1199,26 +1459,46 @@ def history_page(events: Iterable[Dict[str, Any]], error: Optional[str], offset:
     offset, limit = max(0, offset), max(1, min(500, limit))
     q, model, cwd = q.strip().lower(), model.strip().lower(), cwd.strip().lower()
     selected = None if models is None else {str(m).lower() for m in models}
+
     def stamp(value):
-        if not value:return ''
+        if not value:
+            return ""
         parsed = datetime.fromisoformat(value)
-        if parsed.tzinfo is not None:parsed = parsed.astimezone().replace(tzinfo=None)
-        return parsed.isoformat(sep=' ', timespec='seconds')
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed.isoformat(sep=" ", timespec="seconds")
+
     since, until = stamp(since), stamp(until)
+
     def matches(event):
-        em, ec = str(event.get('model','')).lower(), str(event.get('cwd','')).lower()
-        ts = str(event.get('timestamp','')).replace('T',' ')
-        return (not q or q in em or q in ec) and (not model or em == model) and (not cwd or cwd in ec) and (selected is None or em in selected) and (not since or ts >= since) and (not until or ts <= until)
+        em, ec = str(event.get("model", "")).lower(), str(event.get("cwd", "")).lower()
+        ts = str(event.get("timestamp", "")).replace("T", " ")
+        return (
+            (not q or q in em or q in ec)
+            and (not model or em == model)
+            and (not cwd or cwd in ec)
+            and (selected is None or em in selected)
+            and (not since or ts >= since)
+            and (not until or ts <= until)
+        )
+
     filtered = (event for event in events if matches(event))
-    if sort != 'timestamp' or not descending:
-        keys = {'tokens':lambda e:e.get('tokens',{}).get('total',0),
-                'cost':lambda e:e.get('cost_usd',{}).get('total',0),
-                'model':lambda e:e.get('model',''), 'timestamp':lambda e:e.get('timestamp','')}
-        filtered = sorted(filtered, key=keys.get(sort,keys['timestamp']), reverse=descending)
+    if sort != "timestamp" or not descending:
+        keys = {
+            "tokens": lambda e: e.get("tokens", {}).get("total", 0),
+            "cost": lambda e: e.get("cost_usd", {}).get("total", 0),
+            "model": lambda e: e.get("model", ""),
+            "timestamp": lambda e: e.get("timestamp", ""),
+        }
+        filtered = sorted(filtered, key=keys.get(sort, keys["timestamp"]), reverse=descending)
     page, total = [], 0
     for event in filtered:
         event_model, event_cwd = str(event.get("model", "")).lower(), str(event.get("cwd", "")).lower()
-        if (q and q not in event_model and q not in event_cwd) or (model and event_model != model) or (cwd and cwd not in event_cwd):
+        if (
+            (q and q not in event_model and q not in event_cwd)
+            or (model and event_model != model)
+            or (cwd and cwd not in event_cwd)
+        ):
             continue
         if offset <= total < offset + limit:
             page.append(event)
@@ -1229,9 +1509,15 @@ def history_page(events: Iterable[Dict[str, Any]], error: Optional[str], offset:
 class IndexCoordinator:
     """One daemon worker; request threads only read published dictionaries."""
 
-    def __init__(self, index: SessionIndex, sessions_dir: Path,
-                 config_loader: Callable[[], MonitorConfig], cwd_filter: Optional[str], interval: float = 3.0,
-                 rebuild_index: bool = False):
+    def __init__(
+        self,
+        index: SessionIndex,
+        sessions_dir: Path,
+        config_loader: Callable[[], MonitorConfig],
+        cwd_filter: Optional[str],
+        interval: float = 3.0,
+        rebuild_index: bool = False,
+    ):
         self.index = index
         self.sessions_dir = Path(sessions_dir)
         self.config_loader = config_loader
@@ -1284,10 +1570,13 @@ class IndexCoordinator:
             events = self._events
         return [copy.deepcopy(event) for event in events]
 
-    def events_page(self, offset: int = 0, limit: int = 200, q: str = "", model: str = "", cwd: str = "", **filters) -> Dict[str, Any]:
+    def events_page(
+        self, offset: int = 0, limit: int = 200, q: str = "", model: str = "", cwd: str = "", **filters
+    ) -> Dict[str, Any]:
         with self._lock:
             events, error = self._events, self._status_payload.get("last_error")
-        if hasattr(events,'page'):return events.page(error,offset,limit,q,model,cwd,**filters)
+        if hasattr(events, "page"):
+            return events.page(error, offset, limit, q, model, cwd, **filters)
         return history_page(events, error, offset, limit, q, model, cwd, **filters)
 
     def _bootstrap(self, config: MonitorConfig) -> None:
@@ -1310,8 +1599,9 @@ class IndexCoordinator:
         self._bootstrapped = True
 
     def _cached_summary(self, config: MonitorConfig) -> Optional[Dict[str, Any]]:
-        return (self.index.cached_summary(config, self.cwd_filter)
-                or self.index.cached_summary(config, self.cwd_filter, include_events=True))
+        return self.index.cached_summary(config, self.cwd_filter) or self.index.cached_summary(
+            config, self.cwd_filter, include_events=True
+        )
 
     def stop(self, timeout: Optional[float] = 5.0) -> bool:
         """Request shutdown and report termination; None waits until stopped.
@@ -1330,19 +1620,27 @@ class IndexCoordinator:
         payload = status.to_payload()
         if summary is not None:
             summary = dict(summary)
-            events = summary.pop('_history',None)
-            if events is None and 'events' in summary:
-                from compact_history import CompactHistory
-                events=CompactHistory()
-                for row in summary.pop('events',[]):events.append(row)
+            events = summary.pop("_history", None)
+            if events is None and "events" in summary:
+                from codex_glass.storage.compact import CompactHistory
+
+                events = CompactHistory()
+                for row in summary.pop("events", []):
+                    events.append(row)
         with self._lock:
             self._status = status
             self._status_payload = payload
-            if summary is not None and summary.get("index", {}).get("generation", -1) >= self._summary.get("index", {}).get("generation", -1):
-                same_generation=summary.get('index',{}).get('generation')==self._summary.get('index',{}).get('generation')
+            if summary is not None and summary.get("index", {}).get("generation", -1) >= self._summary.get(
+                "index", {}
+            ).get("generation", -1):
+                same_generation = summary.get("index", {}).get("generation") == self._summary.get("index", {}).get(
+                    "generation"
+                )
                 self._summary = summary
-                if events is not None:self._events=events
-                elif not same_generation:self._events=[]
+                if events is not None:
+                    self._events = events
+                elif not same_generation:
+                    self._events = []
 
     def _publish_summary(self, status: IndexStatus, summary: Dict[str, Any]) -> bool:
         # The read/aggregate/serialize phase does not need an indexing lease.
@@ -1350,7 +1648,10 @@ class IndexCoordinator:
         # short in-memory publication so another process cannot advance between
         # them. A superseded read is retried without publishing stale totals.
         with self.index.write_transaction() as writer:
-            if writer.execute("SELECT generation FROM index_state WHERE singleton_id=1").fetchone()[0] != summary["index"]["generation"]:
+            if (
+                writer.execute("SELECT generation FROM index_state WHERE singleton_id=1").fetchone()[0]
+                != summary["index"]["generation"]
+            ):
                 return False
             if self._stop.is_set():
                 raise _StopIndexing()
@@ -1374,8 +1675,9 @@ class IndexCoordinator:
         with self._lock:
             previous = self._status
         message = _sanitized_error(error)
-        status = replace(previous, status="error", complete=False, current_file=None,
-                         last_error=message, updated_at=time.time())
+        status = replace(
+            previous, status="error", complete=False, current_file=None, last_error=message, updated_at=time.time()
+        )
         if isinstance(error, (LostLeaseError, IncompatibleIndexError)):
             self._publish(status)
             return
@@ -1386,7 +1688,8 @@ class IndexCoordinator:
                        last_error=?, updated_at=? WHERE singleton_id=1 AND (
                            (lease_owner=? AND lease_expires_at>?) OR
                            (generation=? AND (lease_owner IS NULL OR lease_expires_at<=?)))""",
-                    (message, time.time(), self._owner, time.time(), self._scan_generation, time.time()))
+                    (message, time.time(), self._owner, time.time(), self._scan_generation, time.time()),
+                )
         except Exception:
             pass  # Even a failed database remains observable through snapshot().
         self._publish(status)
@@ -1405,16 +1708,25 @@ class IndexCoordinator:
                     if not self._bootstrapped:
                         self._bootstrap(config)
                     if not self.index.acquire_lease(self._owner, self._lease_ttl):
-                        status = replace(self.index.read_state(), status="waiting", complete=False,
-                                         current_file=None, last_error=None)
+                        status = replace(
+                            self.index.read_state(),
+                            status="waiting",
+                            complete=False,
+                            current_file=None,
+                            last_error=None,
+                        )
                         self._publish(status, self._cached_summary(config))
                         continue
                     self._renew_at = time.monotonic() + self._lease_ttl / 3
                     self._progress(replace(self.index.read_state(), status="indexing", complete=False))
-                    status = SessionIndexer(self.index, config, lease_owner=self._owner).scan_once(self.sessions_dir, progress=self._progress)
+                    status = SessionIndexer(self.index, config, lease_owner=self._owner).scan_once(
+                        self.sessions_dir, progress=self._progress
+                    )
                     self._check_lease()
                     with self.index.read_transaction() as reader:
-                        self._scan_generation = reader.execute("SELECT generation FROM index_state WHERE singleton_id=1").fetchone()[0]
+                        self._scan_generation = reader.execute(
+                            "SELECT generation FROM index_state WHERE singleton_id=1"
+                        ).fetchone()[0]
                     # Exclusive ownership protects raw indexing. Committed SQL
                     # reads and generation-guarded cache/publication remain safe
                     # without it, even if aggregation or JSON takes minutes.
@@ -1422,15 +1734,21 @@ class IndexCoordinator:
                         raise RuntimeError("Indexing lease lost before summary generation")
                     # No new facts or prices: a minute clock tick is sufficient
                     # for rolling windows. Explicit refresh always recomputes.
-                    aggregate_key=(self._scan_generation,summary_cache_key(config,self.cwd_filter,False),int(time.time()//60))
-                    forced=self._force_summary;self._force_summary=False
-                    if aggregate_key==self._last_aggregate_key and not forced:
+                    aggregate_key = (
+                        self._scan_generation,
+                        summary_cache_key(config, self.cwd_filter, False),
+                        int(time.time() // 60),
+                    )
+                    forced = self._force_summary
+                    self._force_summary = False
+                    if aggregate_key == self._last_aggregate_key and not forced:
                         self._publish(status)
                         continue
                     summary = self.index.build_summary(config, cwd_filter=self.cwd_filter, compact_events=True)
                     if not self._publish_summary(status, summary):
                         self.request_refresh()
-                    else:self._last_aggregate_key=aggregate_key
+                    else:
+                        self._last_aggregate_key = aggregate_key
                 except _StopIndexing:
                     break
                 except Exception as error:

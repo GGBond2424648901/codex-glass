@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from codex_monitor_core import MonitorConfig, build_usage_summary, default_codex_sessions_dir
+from codex_glass.core.usage import MonitorConfig, build_usage_summary, default_codex_sessions_dir
 
 
 def _fmt_int(v: Any) -> str:
@@ -50,24 +50,39 @@ def render(data: Dict[str, Any]):
     print(f"更新时间: {data.get('generated_at')}")
     print()
 
-    print(f"总调用: {_fmt_int(total.get('calls', 0))}  总Token: {_fmt_int(total.get('total_tokens', 0))}  估算费用: {_fmt_usd(total.get('estimated_cost_usd', 0.0))}")
-    print(f"  输入: {_fmt_int(total.get('input_tokens', 0))} (缓存 {_fmt_int(total.get('cached_input_tokens', 0))})  输出: {_fmt_int(total.get('output_tokens', 0))}")
+    print(
+        f"总调用: {_fmt_int(total.get('calls', 0))}  总Token: {_fmt_int(total.get('total_tokens', 0))}  估算费用: {_fmt_usd(total.get('estimated_cost_usd', 0.0))}"
+    )
+    print(
+        f"  输入: {_fmt_int(total.get('input_tokens', 0))} (缓存 {_fmt_int(total.get('cached_input_tokens', 0))})  输出: {_fmt_int(total.get('output_tokens', 0))}"
+    )
     print()
 
-    print(f"最近5小时: 调用 {_fmt_int(five_hour.get('calls', 0))}  Token {_fmt_int(five_hour.get('total_tokens', 0))}  估算费用 {_fmt_usd(five_hour.get('estimated_cost_usd', 0.0))}")
+    print(
+        f"最近5小时: 调用 {_fmt_int(five_hour.get('calls', 0))}  Token {_fmt_int(five_hour.get('total_tokens', 0))}  估算费用 {_fmt_usd(five_hour.get('estimated_cost_usd', 0.0))}"
+    )
 
     primary = rate_limits.get("primary") if isinstance(rate_limits, dict) else None
     if isinstance(primary, dict):
         used_percent = primary.get("used_percent")
         used_str = f"{used_percent}%" if used_percent is not None else "-"
-        print(f"5小时窗口: 已用 {used_str}  重置 {primary.get('resets_at') or '-'}  剩余 {_fmt_seconds(primary.get('remaining_seconds'))}")
+        print(
+            f"5小时窗口: 已用 {used_str}  重置 {primary.get('resets_at') or '-'}  剩余 {_fmt_seconds(primary.get('remaining_seconds'))}"
+        )
 
     print("\nTop 模型:")
     by_model = data.get("by_model", {}) or {}
     rows = []
     if isinstance(by_model, dict):
         for model, stats in by_model.items():
-            rows.append((model, int(stats.get("total_tokens", 0)), int(stats.get("calls", 0)), float(stats.get("estimated_cost_usd", 0.0))))
+            rows.append(
+                (
+                    model,
+                    int(stats.get("total_tokens", 0)),
+                    int(stats.get("calls", 0)),
+                    float(stats.get("estimated_cost_usd", 0.0)),
+                )
+            )
     rows.sort(key=lambda x: x[1], reverse=True)
     for model, tokens, calls, cost in rows[:8]:
         avg = tokens / calls if calls else 0.0
@@ -75,7 +90,7 @@ def render(data: Dict[str, Any]):
 
     print("\n最近调用:")
     recent = data.get("recent_calls", []) or []
-    for item in (recent[:8] if isinstance(recent, list) else []):
+    for item in recent[:8] if isinstance(recent, list) else []:
         ts = item.get("timestamp")
         model = item.get("model")
         tok = item.get("total_tokens")
@@ -89,7 +104,9 @@ def render(data: Dict[str, Any]):
 def main():
     parser = argparse.ArgumentParser(description="Codex Code Monitor - 实时终端监控")
     parser.add_argument("--sessions-dir", default=None, help="会话日志目录（默认：~/.codex/sessions）")
-    parser.add_argument("--config", default=None, help="配置文件路径（默认：~/.codex/monitor_config.json 或 $CODEX_MONITOR_CONFIG）")
+    parser.add_argument(
+        "--config", default=None, help="配置文件路径（默认：~/.codex/monitor_config.json 或 $CODEX_MONITOR_CONFIG）"
+    )
     parser.add_argument("--cwd", default=None, help="仅统计该目录(含子目录)下的会话")
     parser.add_argument("--interval", type=float, default=2.0, help="刷新间隔（秒）")
     args = parser.parse_args()
@@ -115,4 +132,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

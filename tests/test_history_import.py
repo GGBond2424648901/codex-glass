@@ -4,15 +4,15 @@ import unittest
 import json
 from pathlib import Path
 
-from codex_monitor_core import MonitorConfig
-from codex_monitor_import import (
+from codex_glass.core.usage import MonitorConfig
+from codex_glass.storage.history_import import (
     HistoryImportError,
     HistoryImporter,
     rate_limit_key,
     session_key,
     usage_event_key,
 )
-from codex_monitor_index import SessionIndex
+from codex_glass.storage.index import SessionIndex
 
 
 class HistoryImportSchemaTests(unittest.TestCase):
@@ -35,12 +35,7 @@ class HistoryImportSchemaTests(unittest.TestCase):
         reopened = SessionIndex(path)
         reopened.initialize()
         self.addCleanup(reopened.close)
-        tables = {
-            row[0]
-            for row in reopened.connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
+        tables = {row[0] for row in reopened.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue(
             {
                 "history_imports",
@@ -86,8 +81,7 @@ class HistoryImporterTests(unittest.TestCase):
         self.addCleanup(self.target.close)
         self.importer = HistoryImporter(self.target)
 
-    def make_source(self, name="source.sqlite3", root=r"C:\Users\PC\.codex\sessions",
-                    tokens=110, source_offset=20):
+    def make_source(self, name="source.sqlite3", root=r"C:\Users\PC\.codex\sessions", tokens=110, source_offset=20):
         path = self.root / name
         source = SessionIndex(path)
         source.initialize()
@@ -140,10 +134,12 @@ class HistoryImporterTests(unittest.TestCase):
         first = self.importer.import_database(source)
         second = self.importer.import_database(source)
 
-        self.assertEqual((1, 1, 1), (first.imported_files, first.imported_usage_events,
-                                     first.imported_rate_limit_snapshots))
-        self.assertEqual((0, 0, 0), (second.imported_files, second.imported_usage_events,
-                                     second.imported_rate_limit_snapshots))
+        self.assertEqual(
+            (1, 1, 1), (first.imported_files, first.imported_usage_events, first.imported_rate_limit_snapshots)
+        )
+        self.assertEqual(
+            (0, 0, 0), (second.imported_files, second.imported_usage_events, second.imported_rate_limit_snapshots)
+        )
         summary = self.target.build_summary(MonitorConfig.load(self.root / "missing.json"), include_events=True)
         self.assertEqual(110, summary["total"]["total_tokens"])
         self.assertEqual(1, summary["source"]["imported_sources"])
@@ -163,28 +159,25 @@ class HistoryImporterTests(unittest.TestCase):
         self.assertEqual(1, summary["source"]["imported_usage_events"])
         self.assertEqual(1, summary["source"]["imported_rate_limit_snapshots"])
         self.assertNotIn("copied-sessions", json.dumps(summary))
-        self.assertEqual(2, self.target.connection.execute(
-            "SELECT COUNT(*) FROM imported_usage_events"
-        ).fetchone()[0])
-        self.assertEqual(2, self.target.connection.execute(
-            "SELECT COUNT(*) FROM imported_rate_limit_snapshots"
-        ).fetchone()[0])
+        self.assertEqual(2, self.target.connection.execute("SELECT COUNT(*) FROM imported_usage_events").fetchone()[0])
+        self.assertEqual(
+            2, self.target.connection.execute("SELECT COUNT(*) FROM imported_rate_limit_snapshots").fetchone()[0]
+        )
 
     def test_rebuild_preserves_import_and_remove_source_deletes_only_imported_history(self):
         source = self.make_source()
         result = self.importer.import_database(source)
         self.target.rebuild()
-        self.assertEqual(1, self.target.connection.execute(
-            "SELECT COUNT(*) FROM imported_usage_events"
-        ).fetchone()[0])
+        self.assertEqual(1, self.target.connection.execute("SELECT COUNT(*) FROM imported_usage_events").fetchone()[0])
 
         removed = self.importer.remove_source(result.source_id)
-        self.assertEqual((1, 1, 1), (removed.removed_files, removed.removed_usage_events,
-                                     removed.removed_rate_limit_snapshots))
+        self.assertEqual(
+            (1, 1, 1), (removed.removed_files, removed.removed_usage_events, removed.removed_rate_limit_snapshots)
+        )
         self.assertEqual([], self.importer.list_sources())
-        self.assertEqual(0, self.target.build_summary(
-            MonitorConfig.load(self.root / "missing.json")
-        )["total"]["total_tokens"])
+        self.assertEqual(
+            0, self.target.build_summary(MonitorConfig.load(self.root / "missing.json"))["total"]["total_tokens"]
+        )
 
     def test_corrupt_source_is_rejected_without_target_mutation(self):
         corrupt = self.root / "corrupt.sqlite3"
@@ -203,9 +196,7 @@ class HistoryImporterTests(unittest.TestCase):
         with self.assertRaisesRegex(sqlite3.DatabaseError, "reject import"):
             self.importer.import_database(source)
         self.assertEqual([], self.importer.list_sources())
-        self.assertEqual(0, self.target.connection.execute(
-            "SELECT COUNT(*) FROM imported_session_files"
-        ).fetchone()[0])
+        self.assertEqual(0, self.target.connection.execute("SELECT COUNT(*) FROM imported_session_files").fetchone()[0])
 
 
 if __name__ == "__main__":

@@ -11,9 +11,9 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
 
-from codex_monitor_index import IncompatibleIndexError, SessionIndex
-import codex_monitor_index as index_module
-from codex_monitor_core import MonitorConfig, parse_usage_events_from_session_file
+from codex_glass.storage.index import IncompatibleIndexError, SessionIndex
+import codex_glass.storage.index as index_module
+from codex_glass.core.usage import MonitorConfig, parse_usage_events_from_session_file
 from tests.helpers import sample_records, write_jsonl
 
 
@@ -54,7 +54,7 @@ class RelevantLineReaderTests(unittest.TestCase):
         prefix = b"old\n"
         record = b'{"type":"token_count"}\n'
         reader = self.reader(io.BytesIO(prefix + record), len(prefix), chunk_size=3)
-        line, = list(reader)
+        (line,) = list(reader)
         self.assertEqual((4, 4 + len(record), record), (line.source_offset, line.next_offset, line.data))
 
     def test_marker_beyond_probe_is_ignored(self):
@@ -94,9 +94,14 @@ class SessionIndexerTests(unittest.TestCase):
                     stream.write(b"\n")
 
     def token(self, total=250, input=210, output=40):
-        return {"timestamp": "2026-09-08T01:02:02Z", "type": "event_msg", "payload": {
-            "type": "token_count", "info": {"total_token_usage": {
-                "total_tokens": total, "input_tokens": input, "output_tokens": output}}}}
+        return {
+            "timestamp": "2026-09-08T01:02:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": {"total_tokens": total, "input_tokens": input, "output_tokens": output}},
+            },
+        }
 
     def test_first_scan_matches_legacy_events_and_reports_progress(self):
         records = sample_records() + [self.token(), self.token(), self.token(10, 8, 2), self.token(30, 20, 10)]
@@ -107,9 +112,10 @@ class SessionIndexerTests(unittest.TestCase):
         actual = self.index.load_events()
         self.assertEqual([110, 85, 55, 20], [row["total_tokens"] for row in actual])
         for event, row in zip(expected, actual):
-            self.assertEqual((event.model, event.cwd, event.timestamp.isoformat(), vars(event.delta)),
-                             (row["model"], row["cwd"], row["occurred_at"],
-                              {key: row[key] for key in vars(event.delta)}))
+            self.assertEqual(
+                (event.model, event.cwd, event.timestamp.isoformat(), vars(event.delta)),
+                (row["model"], row["cwd"], row["occurred_at"], {key: row[key] for key in vars(event.delta)}),
+            )
         self.assertTrue(status.complete)
         self.assertEqual((1, 1, 1), (status.total_files, status.processed_files, status.changed_files))
         self.assertEqual(self.log.stat().st_size, status.processed_bytes)
@@ -124,9 +130,11 @@ class SessionIndexerTests(unittest.TestCase):
         self.append([self.token()])
         starts = []
         real_reader = index_module.iter_relevant_lines
+
         def observe(stream, start_offset, **kwargs):
             starts.append(start_offset)
             return real_reader(stream, start_offset, **kwargs)
+
         with mock.patch.object(index_module, "iter_relevant_lines", side_effect=observe):
             status = self.indexer.scan_once(self.sessions)
         self.assertEqual([old_size], starts)
@@ -151,8 +159,10 @@ class SessionIndexerTests(unittest.TestCase):
         self.append([self.token()])
         index_module.SessionIndexer(self.index, self.config).scan_once(self.sessions)
         last = self.index.load_events()[-1]
-        self.assertEqual(("gpt-5", "C:/work/a", 55, 40, 15),
-                         (last["model"], last["cwd"], last["total_tokens"], last["input_tokens"], last["output_tokens"]))
+        self.assertEqual(
+            ("gpt-5", "C:/work/a", 55, 40, 15),
+            (last["model"], last["cwd"], last["total_tokens"], last["input_tokens"], last["output_tokens"]),
+        )
 
     def test_partial_final_line_is_only_committed_after_newline(self):
         write_jsonl(self.log, sample_records())
@@ -175,8 +185,13 @@ class SessionIndexerTests(unittest.TestCase):
         self.assertEqual(self.log.stat().st_size, self.index.get_file_state(self.log).offset)
 
     def test_out_of_range_counters_are_skipped_without_poisoning_baseline(self):
-        for field in ("total_tokens", "input_tokens", "cached_input_tokens", "output_tokens",
-                      "reasoning_output_tokens"):
+        for field in (
+            "total_tokens",
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        ):
             for value in (10**25, -(10**25)):
                 with self.subTest(field=field, value=value):
                     self.index.rebuild()
@@ -186,14 +201,15 @@ class SessionIndexerTests(unittest.TestCase):
                     status = self.indexer.scan_once(self.sessions)
                     self.assertEqual([110, 85, 55], [row["total_tokens"] for row in self.index.load_events()])
                     state = self.index.get_file_state(self.log)
-                    self.assertEqual((250, 210, 40), (state.previous_total_tokens,
-                                     state.previous_input_tokens, state.previous_output_tokens))
+                    self.assertEqual(
+                        (250, 210, 40),
+                        (state.previous_total_tokens, state.previous_input_tokens, state.previous_output_tokens),
+                    )
                     self.assertEqual(self.log.stat().st_size, state.offset)
                     self.assertIn("1 malformed", status.last_error)
 
     def test_out_of_range_delta_is_skipped_without_poisoning_baseline(self):
-        write_jsonl(self.log, [self.token(1, -(2**63), 0), self.token(2, 2**63 - 1, 0),
-                              self.token(3, -(2**63) + 5, 0)])
+        write_jsonl(self.log, [self.token(1, -(2**63), 0), self.token(2, 2**63 - 1, 0), self.token(3, -(2**63) + 5, 0)])
         status = self.indexer.scan_once(self.sessions)
         self.assertEqual([1, 2], [row["total_tokens"] for row in self.index.load_events()])
         self.assertEqual([-(2**63), 5], [row["input_tokens"] for row in self.index.load_events()])
@@ -275,10 +291,12 @@ class SessionIndexerTests(unittest.TestCase):
     def test_disappearing_between_discovery_and_open_is_reported(self):
         write_jsonl(self.log, sample_records())
         original_open = Path.open
+
         def disappearing(path, *args, **kwargs):
             if path == self.log:
                 path.unlink(missing_ok=True)
             return original_open(path, *args, **kwargs)
+
         with mock.patch.object(Path, "open", disappearing):
             status = self.indexer.scan_once(self.sessions)
         self.assertTrue(self.index.get_file_state(self.log).missing)
@@ -288,13 +306,17 @@ class SessionIndexerTests(unittest.TestCase):
     def test_rate_limit_without_usage_is_persisted_and_replacement_clears_it(self):
         token = self.token()
         token["payload"]["info"] = None
-        token["payload"]["rate_limits"] = {"limit_id": "codex", "primary": {
-            "used_percent": 25, "window_minutes": 300, "resets_in_seconds": 120}}
+        token["payload"]["rate_limits"] = {
+            "limit_id": "codex",
+            "primary": {"used_percent": 25, "window_minutes": 300, "resets_in_seconds": 120},
+        }
         write_jsonl(self.log, [token])
         self.indexer.scan_once(self.sessions)
-        snapshot, = self.index.load_rate_limits()
-        self.assertEqual(("codex", 25, 300, 120), (snapshot["limit_id"], snapshot["used_percent"],
-                         snapshot["window_minutes"], snapshot["resets_in_seconds"]))
+        (snapshot,) = self.index.load_rate_limits()
+        self.assertEqual(
+            ("codex", 25, 300, 120),
+            (snapshot["limit_id"], snapshot["used_percent"], snapshot["window_minutes"], snapshot["resets_in_seconds"]),
+        )
         self.assertEqual([], self.index.load_events())
         write_jsonl(self.log, [self.token()])
         self.indexer.scan_once(self.sessions)
@@ -304,8 +326,10 @@ class SessionIndexerTests(unittest.TestCase):
         records = [self.token(total=i, input=i, output=0) for i in range(1, 301)]
         records.append(self.token(total=313, input=313, output=0))
         write_jsonl(self.log, records)
-        self.index.connection.execute("""CREATE TEMP TRIGGER fail_last_batch BEFORE INSERT ON usage_events
-            WHEN NEW.total_tokens=13 BEGIN SELECT RAISE(ABORT, 'simulated interrupted batch'); END""")
+        self.index.connection.execute(
+            """CREATE TEMP TRIGGER fail_last_batch BEFORE INSERT ON usage_events
+            WHEN NEW.total_tokens=13 BEGIN SELECT RAISE(ABORT, 'simulated interrupted batch'); END"""
+        )
         with self.assertRaises(sqlite3.IntegrityError):
             self.indexer.scan_once(self.sessions)
         committed = self.index.get_file_state(self.log)
@@ -324,10 +348,14 @@ class SessionIndexerTests(unittest.TestCase):
         self.assertEqual(self.log.stat().st_size, self.index.get_file_state(self.log).offset)
 
     def test_context_changes_and_zero_deltas_survive_restart(self):
-        write_jsonl(self.log, sample_records() + [
-            {"type": "turn_context", "payload": {"cwd": "C:/work/b", "model": "gpt-5-mini"}},
-            self.token(10, 5, 5),
-        ])
+        write_jsonl(
+            self.log,
+            sample_records()
+            + [
+                {"type": "turn_context", "payload": {"cwd": "C:/work/b", "model": "gpt-5-mini"}},
+                self.token(10, 5, 5),
+            ],
+        )
         self.indexer.scan_once(self.sessions)
         self.index.close()
         self.index.initialize()
@@ -372,7 +400,9 @@ class SessionIndexSchemaTests(unittest.TestCase):
         self.assertEqual(1, index.schema_version())
         self.assertEqual("wal", index.connection.execute("PRAGMA journal_mode").fetchone()[0].lower())
         tables = {row[0] for row in index.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertTrue({"session_files", "usage_events", "rate_limit_snapshots", "index_state", "summary_cache"} <= tables)
+        self.assertTrue(
+            {"session_files", "usage_events", "rate_limit_snapshots", "index_state", "summary_cache"} <= tables
+        )
 
     def test_incompatible_schema_is_rejected_without_changing_database(self) -> None:
         connection = sqlite3.connect(self.db_path)
@@ -482,7 +512,7 @@ class SessionIndexSchemaTests(unittest.TestCase):
             clock[0] = 102.0
             return original_run_write(operation)
 
-        with mock.patch("codex_monitor_index.time.time", side_effect=lambda: clock[0]):
+        with mock.patch("codex_glass.storage.index.time.time", side_effect=lambda: clock[0]):
             with mock.patch.object(index, "_run_write", side_effect=run_after_wait):
                 self.assertTrue(index.acquire_lease("owner", ttl_seconds=1))
 
@@ -496,7 +526,7 @@ class SessionIndexSchemaTests(unittest.TestCase):
         self.addCleanup(index.close)
         index.initialize()
         clock = [100.0]
-        with mock.patch("codex_monitor_index.time.time", side_effect=lambda: clock[0]):
+        with mock.patch("codex_glass.storage.index.time.time", side_effect=lambda: clock[0]):
             self.assertTrue(index.acquire_lease("owner", ttl_seconds=20))
             original_run_write = index._run_write
 
@@ -527,7 +557,9 @@ class IndexCoordinatorTests(unittest.TestCase):
 
     def coordinator(self, interval=60):
         self.assertTrue(hasattr(index_module, "IndexCoordinator"), "background coordinator is missing")
-        coordinator = index_module.IndexCoordinator(self.index, self.sessions, lambda: self.config, None, interval=interval)
+        coordinator = index_module.IndexCoordinator(
+            self.index, self.sessions, lambda: self.config, None, interval=interval
+        )
         self.addCleanup(coordinator.stop)
         return coordinator
 
@@ -629,16 +661,22 @@ class IndexCoordinatorTests(unittest.TestCase):
         self.assertIsNone(ready["index"]["last_error"])
 
     def test_status_payload_redacts_network_share_paths(self):
-        status = replace(self.index.read_state(), current_file=r"\\server\private\session.jsonl",
-                         last_error=r"Cannot read '\\server\private\session.jsonl'")
+        status = replace(
+            self.index.read_state(),
+            current_file=r"\\server\private\session.jsonl",
+            last_error=r"Cannot read '\\server\private\session.jsonl'",
+        )
         payload = status.to_payload()
         self.assertEqual("会话文件 1", payload["current_file"])
         self.assertNotIn("server", json.dumps(payload))
         self.assertNotIn("private", json.dumps(payload))
 
     def test_status_payload_redacts_full_paths_with_embedded_quotes(self):
-        for path in (r"C:\sessions\O'customer-name.jsonl", "/home/o'brien/customer-project/session.jsonl",
-                     '/home/o"brien/customer-project/session.jsonl'):
+        for path in (
+            r"C:\sessions\O'customer-name.jsonl",
+            "/home/o'brien/customer-project/session.jsonl",
+            '/home/o"brien/customer-project/session.jsonl',
+        ):
             with self.subTest(path=path):
                 status = replace(self.index.read_state(), last_error=f"Cannot read '{path}'")
                 self.assertEqual("Cannot read [本地路径]", status.to_payload()["last_error"])
@@ -672,8 +710,11 @@ class IndexCoordinatorTests(unittest.TestCase):
             return original_dumps(value, **kwargs)
 
         fake_json = SimpleNamespace(dumps=dumps, loads=json.loads)
-        with mock.patch.object(index_module, "time", fake_time), mock.patch.object(index_module, "json", fake_json), \
-                mock.patch.object(index_module, "aggregate_usage_events", aggregate):
+        with (
+            mock.patch.object(index_module, "time", fake_time),
+            mock.patch.object(index_module, "json", fake_json),
+            mock.patch.object(index_module, "aggregate_usage_events", aggregate),
+        ):
             coordinator.start()
             ready = self.wait_status(coordinator, "ready")
             coordinator.stop()
@@ -799,13 +840,18 @@ class IndexCoordinatorTests(unittest.TestCase):
 
     def test_large_irrelevant_content_reports_intermediate_progress_for_lease_renewal(self):
         path = self.sessions / "large.jsonl"
-        path.write_bytes((b'{"type":"unrelated","text":"' + b'x' * 600000 + b'"}\n') * 8)
+        path.write_bytes((b'{"type":"unrelated","text":"' + b"x" * 600000 + b'"}\n') * 8)
         statuses = []
         ticks = iter(range(100))
-        with mock.patch("codex_monitor_index.time.monotonic", side_effect=lambda: next(ticks)):
+        with mock.patch("codex_glass.storage.index.time.monotonic", side_effect=lambda: next(ticks)):
             index_module.SessionIndexer(self.index, self.config).scan_once(self.sessions, progress=statuses.append)
-        self.assertTrue(any(status.current_file == str(path) and 0 < status.processed_bytes < path.stat().st_size for status in statuses),
-                        "skipped content must still provide lease/shutdown checkpoints")
+        self.assertTrue(
+            any(
+                status.current_file == str(path) and 0 < status.processed_bytes < path.stat().st_size
+                for status in statuses
+            ),
+            "skipped content must still provide lease/shutdown checkpoints",
+        )
 
     def test_lease_renews_during_scan_and_is_released_on_orderly_stop(self):
         coordinator = self.coordinator(interval=0.05)
@@ -826,7 +872,10 @@ class IndexCoordinatorTests(unittest.TestCase):
                 progress(status)
             return replace(status, status="ready", complete=True)
 
-        with mock.patch.object(index_module, "_LEASE_TTL_SECONDS", 1, create=True), mock.patch.object(index_module.SessionIndexer, "scan_once", long_scan):
+        with (
+            mock.patch.object(index_module, "_LEASE_TTL_SECONDS", 1, create=True),
+            mock.patch.object(index_module.SessionIndexer, "scan_once", long_scan),
+        ):
             self.addCleanup(release.set)
             coordinator.start()
             self.assertTrue(renewed.wait(timeout=2.5))
