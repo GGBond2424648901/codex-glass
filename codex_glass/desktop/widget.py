@@ -1,6 +1,6 @@
 """Native Frosted Glass presentation: real Qt controls, vector charts and SQLite API."""
 
-import argparse, ctypes, json, os, socket as net_socket, subprocess, sys, time
+import argparse, ctypes, json, os, re, socket as net_socket, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 from PyQt5 import sip
@@ -36,6 +36,16 @@ from codex_glass.desktop.components.style import (
 )
 from codex_glass.desktop.components.popups import GlassInfoPopup, GlassMenu
 from codex_glass.resources import resource_path, resource_root
+
+APP_VERSION = resource_path("VERSION").read_text(encoding="utf-8").strip()
+
+AGGREGATION_PHASES = {
+    "reading": "读取用量事实",
+    "quotas": "整理额度快照",
+    "pricing": "计算使用费用",
+    "totals": "生成统计图表",
+    "history": "整理历史明细",
+}
 
 
 def display_number(value):
@@ -566,20 +576,32 @@ class GlassWidget(QWidget):
             age = 999
         index = self.data.get("index", {})
         status = index.get("status")
-        fresh = self.connected and age < 180 and status in (None, "ready") and not index.get("last_error")
+        error = str(index.get("last_error") or "")
+        warning = bool(re.fullmatch(r"Skipped \d+ malformed and \d+ oversized relevant records", error))
+        fatal = status == "error" or (bool(error) and not warning)
+        fresh = self.connected and age < 180 and status in (None, "ready") and not fatal
         self.dot.setStyleSheet("color:" + (MINT if fresh else "#d79c62") + ";")
         self.dot.setToolTip(("已同步" if fresh else "离线或数据较旧") + f"\n{stamp}\n每5秒检查；索引汇总可能延迟")
         if not self.connected:
             message = "正在连接本机数据…" if self.backend_attempts < 3 else "后台未连接\n菜单 → 立即检查数据"
-        elif status == "error" or index.get("last_error"):
+        elif fatal:
             message = "索引失败 · 查看状态提示"
             self.dot.setToolTip("索引失败\n" + str(index.get("last_error") or "请检查目录和权限"))
         elif status in ("starting", "indexing", "discovering"):
             message = "正在扫描本机会话…"
+        elif status == "waiting":
+            message = "等待其他后台完成索引…"
+        elif status == "aggregating":
+            message = AGGREGATION_PHASES.get(index.get("phase"), "正在汇总用量") + "…"
+            self.dot.setToolTip(
+                f"{message}\n已处理 {index.get('phase_processed', 0):,} 条\n汇总耗时 {index.get('phase_elapsed_seconds', 0)} 秒"
+            )
         elif not self.data.get("total", {}).get("total_tokens"):
             message = "未发现用量记录\n请确认本机已使用 Codex"
         else:
             message = "当前时段暂无用量 · 可切换累计"
+        if warning:
+            self.dot.setToolTip(self.dot.toolTip() + "\n已跳过格式异常记录，其余记录继续处理。")
         self.chart.empty_text = message
         self.chart.update()
         self.chart.set_live(fresh)
@@ -834,13 +856,16 @@ class GlassWidget(QWidget):
         return "\n".join(
             [
                 "Codex Glass 数据诊断（含本机路径，不含聊天和令牌）",
+                f"界面版本：{APP_VERSION}；后台版本：{(self.data.get('server') or {}).get('version', '未知/旧版')}；后台 PID：{(self.data.get('server') or {}).get('pid', '未知')}",
                 f"后台地址：{self.url}",
                 f"连接：{'成功' if self.connected else '未连接'}；启动尝试：{self.backend_attempts}",
                 f"默认会话目录：{directory}",
                 f"目录检查：{'存在' if directory.is_dir() else '目录不存在'}",
                 f"默认监控索引：{default_index_path()}",
                 f"索引状态：{index.get('status', '尚未收到')}；错误：{index.get('last_error') or '无'}",
-                f"发现文件：{source.get('files', index.get('total_files', 0))}；导入事件：{source.get('imported_usage_events', 0)}",
+                f"扫描文件：{index.get('processed_files', 0)}/{index.get('total_files', 0)}；汇总文件：{source.get('files', 0)}",
+                f"汇总阶段：{AGGREGATION_PHASES.get(index.get('phase'), index.get('phase', '无'))}；已处理：{index.get('phase_processed', 0)}；耗时：{index.get('phase_elapsed_seconds', 0)} 秒",
+                f"导入事件：{source.get('imported_usage_events', 0)}",
                 f"累计 Token：{self.data.get('total', {}).get('total_tokens', 0)}；当前时段：{self.scope}",
                 f"后台日志：{runtime / 'backend.log'}",
                 "工作任务文件夹与会话日志目录不是同一个位置。",
@@ -866,6 +891,10 @@ class GlassWidget(QWidget):
             data = json.loads(bytes(reply.readAll()).decode("utf-8"))
             if not isinstance(data, dict) or not isinstance(data.get("total"), dict):
                 raise ValueError("invalid payload")
+            if self.start_backend and QUrl(self.url).host() in ("127.0.0.1", "localhost"):
+                server = data.get("server")
+                if not isinstance(server, dict) or server.get("version") != APP_VERSION:
+                    raise ValueError("local backend version mismatch")
             self.apply_data(data)
         except (ValueError, TypeError, KeyError, OverflowError):
             self.connected = False

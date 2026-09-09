@@ -17,6 +17,47 @@ from tests.helpers import sample_records, write_jsonl
 
 
 class WebIndexingTests(unittest.TestCase):
+    def test_local_only_summary_avoids_cross_computer_fingerprints(self):
+        from codex_glass.storage.history_import import usage_event_key
+
+        with mock.patch("codex_glass.storage.history_import.usage_event_key", wraps=usage_event_key) as fingerprints:
+            result = self.index.build_summary(self.config, compact_events=True)
+        self.assertEqual(195, result["total"]["total_tokens"])
+        self.assertEqual(2, len(result["_history"]))
+        self.assertEqual(0, fingerprints.call_count, "No imported facts exist to deduplicate against")
+
+    def test_summary_visible_before_slow_history_materialization(self):
+        from codex_glass.storage.compact import CompactHistory
+
+        with self.index.write_transaction() as connection:
+            connection.execute("DELETE FROM summary_cache")
+        entered, release = threading.Event(), threading.Event()
+        original = CompactHistory.append
+
+        def slow_append(history, row):
+            entered.set()
+            release.wait(5)
+            original(history, row)
+
+        with mock.patch.object(CompactHistory, "append", slow_append):
+            self.coordinator.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                snapshot = self.coordinator.snapshot()
+                self.assertEqual(195, snapshot["total"]["total_tokens"])
+                self.assertEqual("aggregating", snapshot["index"]["status"])
+                self.assertEqual("history", snapshot["index"]["phase"])
+                self.assertEqual(1, snapshot["source"]["files"])
+                release.set()
+                deadline = time.monotonic() + 2
+                while self.coordinator.snapshot()["index"]["status"] != "ready" and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual("ready", self.coordinator.snapshot()["index"]["status"])
+                self.assertEqual(2, self.coordinator.events_page()["total"])
+            finally:
+                release.set()
+                self.coordinator.stop(timeout=None)
+
     def test_idle_scans_reuse_history_until_clock_bucket_or_explicit_refresh(self):
         self.coordinator.interval = 0.025
         with mock.patch.object(self.index, "build_summary", wraps=self.index.build_summary) as builds:

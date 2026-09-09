@@ -31,6 +31,7 @@ from codex_glass.resources import dashboard_build_identity, resource_path
 
 
 _DASHBOARD_BUILD = dashboard_build_identity()
+_VERSION = resource_path("VERSION").read_text(encoding="utf-8").strip()
 
 
 HTML_PAGE = resource_path("assets", "web", "dashboard.html").read_text(encoding="utf-8")
@@ -58,6 +59,7 @@ class Handler(BaseHTTPRequestHandler):
             from codex_glass.core.presentation import desktop_snapshot
 
             data = desktop_snapshot(self.server.coordinator)
+            data["server"] = {"pid": os.getpid(), "build": _DASHBOARD_BUILD, "version": _VERSION}
             self._send(200, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
 

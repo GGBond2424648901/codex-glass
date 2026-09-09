@@ -701,6 +701,8 @@ def aggregate_usage_events(
     source_metadata: Optional[Dict[str, Any]] = None,
     cwd_filter: Optional[str] = None,
     event_sink=None,
+    summary_sink=None,
+    progress=None,
 ) -> Dict[str, Any]:
     """
     读取 ~/.codex/sessions 并汇总：
@@ -723,7 +725,9 @@ def aggregate_usage_events(
     five_hour_slot_minutes = 5
 
     all_events: List[UsageEvent] = []
-    for event in events:
+    for position, event in enumerate(events):
+        if progress is not None and position % 4096 == 0:
+            progress("pricing", position, len(events) if hasattr(events, "__len__") else 0)
         if not _path_matches_filter(event.cwd, cwd_filter):
             continue
         estimated_cost_usd, pricing_source = estimate_cost_usd(event.model, event.delta, cfg)
@@ -820,7 +824,9 @@ def aggregate_usage_events(
     all_chart_tokens = [0] * len(all_chart_dates)
     all_chart_models: Dict[str, List[int]] = {}
 
-    for event in all_events:
+    for position, event in enumerate(all_events):
+        if progress is not None and position % 4096 == 0:
+            progress("totals", position, len(all_events))
         delta = event.delta
         event_tokens = max(0, delta.total_tokens)
 
@@ -1226,9 +1232,16 @@ def aggregate_usage_events(
         "note": "费用为按当前价格重估的估算值，不是历史账单：默认使用内置 OpenAI Standard tier 文本 token 定价（https://developers.openai.com/api/docs/pricing，2026-09-08 已核对）；也可在本地 monitor_config 配置中覆盖 pricing_per_million / model_aliases。未知模型保持未定价。路径与工作区名称默认已匿名化，便于公开展示。",
     }
 
+    if summary_sink is not None:
+        summary_sink(dict(summary))
+
     if include_events or event_sink is not None:
+        if progress is not None:
+            progress("history", 0, len(all_events))
         events_payload: List[Dict[str, Any]] = []
-        for e in reversed(all_events):
+        for position, e in enumerate(reversed(all_events)):
+            if progress is not None and position % 4096 == 0:
+                progress("history", position, len(all_events))
             delta = e.delta
             rates, base_source = cfg.rates_for_model(e.model)
 

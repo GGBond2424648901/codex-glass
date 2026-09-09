@@ -76,7 +76,22 @@ class GlassUITests(unittest.TestCase):
         command = launch.call_args.args[0]
         self.assertIn("--host", command)
         self.assertEqual("127.0.0.1", command[command.index("--host") + 1])
-        self.assertEqual("8081", command[command.index("--port") + 1])
+        self.assertEqual(f"http://127.0.0.1:{command[command.index('--port') + 1]}", self.widget.url)
+
+    def test_old_backend_version_is_not_mistaken_for_upgraded_backend(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        self.widget.start_backend = True
+        reply = SimpleNamespace(
+            error=lambda: 0,
+            readAll=lambda: b'{"total":{"total_tokens":999},"server":{"version":"0.0.0"}}',
+            deleteLater=lambda: None,
+        )
+        with patch.object(self.widget, "launch_backend"):
+            self.widget.received(reply)
+        self.assertFalse(self.widget.connected)
+        self.assertEqual({}, self.widget.data)
 
     def test_index_error_is_visible_in_empty_chart(self):
         from datetime import datetime
@@ -90,6 +105,21 @@ class GlassUITests(unittest.TestCase):
         self.assertIn("索引失败", getattr(self.widget.chart, "empty_text", ""))
         self.assertIn("root mismatch", self.widget.dot.toolTip())
         self.assertFalse(self.widget.chart.live)
+
+    def test_skipped_record_warning_does_not_mask_aggregation_or_ready_data(self):
+        data = telemetry()
+        data["index"] = {
+            "status": "aggregating",
+            "phase": "history",
+            "last_error": "Skipped 1 malformed and 0 oversized relevant records",
+        }
+        self.widget.apply_data(data)
+        self.assertNotIn("索引失败", self.widget.dot.toolTip())
+        self.assertIn("历史", self.widget.dot.toolTip())
+        self.assertNotEqual("—", self.widget.tokens.text())
+        data["index"]["status"] = "ready"
+        self.widget.apply_data(data)
+        self.assertNotIn("索引失败", self.widget.dot.toolTip())
 
     def test_zero_series_still_renders_its_empty_state_message(self):
         self.widget.set_motion(False)
@@ -206,8 +236,25 @@ class GlassUITests(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(project_root)
         env["QT_QPA_PLATFORM"] = "windows"
+        isolation = """
+import os
+from codex_glass.desktop import widget as _probe_module
+from PyQt5.QtNetwork import QLocalServer as _Server, QLocalSocket as _Socket
+_suffix = '-test-' + str(os.getpid())
+class _IsolatedServer(_Server):
+    @staticmethod
+    def removeServer(name):
+        return _Server.removeServer(name + _suffix)
+    def listen(self, name):
+        return super().listen(name + _suffix)
+class _IsolatedSocket(_Socket):
+    def connectToServer(self, name, *args):
+        return super().connectToServer(name + _suffix, *args)
+_probe_module.QLocalServer = _IsolatedServer
+_probe_module.QLocalSocket = _IsolatedSocket
+"""
         return subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(code)],
+            [sys.executable, "-c", isolation + textwrap.dedent(code)],
             cwd=project_root,
             env=env,
             capture_output=True,

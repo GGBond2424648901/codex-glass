@@ -419,9 +419,13 @@ class SessionIndex:
         include_events: bool = False,
         cwd_filter: Optional[str] = None,
         compact_events: bool = False,
+        summary_ready=None,
+        progress=None,
     ) -> Dict[str, Any]:
         """Aggregate one committed generation using current prices and clock."""
         current_time = now or datetime.now()
+        if progress is not None:
+            progress("reading", 0, 0)
         config_key = summary_cache_key(config, cwd_filter, include_events)
         with self.read_transaction() as reader:
             state_row = reader.execute("SELECT * FROM index_state WHERE singleton_id=1").fetchone()
@@ -471,11 +475,17 @@ class SessionIndex:
 
             event_rows = []
             local_event_keys = set()
+            has_imported_events = reader.execute("SELECT 1 FROM imported_usage_events LIMIT 1").fetchone() is not None
+            has_imported_rates = (
+                reader.execute("SELECT 1 FROM imported_rate_limit_snapshots LIMIT 1").fetchone() is not None
+            )
             for row in reader.execute(
                 """SELECT e.*, f.path AS session_path, f.head_hash AS session_head_hash
                      FROM usage_events e JOIN session_files f ON e.file_id=f.file_id
                    ORDER BY e.occurred_at, f.path COLLATE session_path, e.source_offset"""
             ):
+                if progress is not None and len(event_rows) % 4096 == 0:
+                    progress("reading", len(event_rows), 0)
                 delta = UsageDelta(
                     *(
                         int(row[name])
@@ -488,20 +498,21 @@ class SessionIndex:
                         )
                     )
                 )
-                stable_session = stable_session_for(row)
-                stable_event = usage_event_key(
-                    stable_session,
-                    row["source_offset"],
-                    row["occurred_at"],
-                    row["model"],
-                    row["cwd"],
-                    row["input_tokens"],
-                    row["cached_input_tokens"],
-                    row["output_tokens"],
-                    row["reasoning_output_tokens"],
-                    row["total_tokens"],
-                )
-                local_event_keys.add(stable_event)
+                if has_imported_events:
+                    stable_session = stable_session_for(row)
+                    stable_event = usage_event_key(
+                        stable_session,
+                        row["source_offset"],
+                        row["occurred_at"],
+                        row["model"],
+                        row["cwd"],
+                        row["input_tokens"],
+                        row["cached_input_tokens"],
+                        row["output_tokens"],
+                        row["reasoning_output_tokens"],
+                        row["total_tokens"],
+                    )
+                    local_event_keys.add(stable_event)
                 event_rows.append(
                     (
                         datetime.fromisoformat(row["occurred_at"]),
@@ -526,6 +537,8 @@ class SessionIndex:
                        ON f.source_id=e.source_id AND f.source_file_id=e.source_file_id
                     ORDER BY e.occurred_at, f.source_path, e.source_offset, e.source_id"""
             ):
+                if progress is not None and len(event_rows) % 4096 == 0:
+                    progress("reading", len(event_rows), 0)
                 if row["event_key"] in local_event_keys or row["event_key"] in imported_event_keys:
                     continue
                 imported_event_keys.add(row["event_key"])
@@ -563,6 +576,8 @@ class SessionIndex:
             del event_rows, local_event_keys, imported_event_keys
 
             by_session: Dict[str, Dict[str, RateLimitSnapshot]] = {}
+            if progress is not None:
+                progress("quotas", 0, 0)
             local_rate_keys = set()
             for row in reader.execute(
                 """SELECT r.*, f.path AS session_path, f.head_hash AS session_head_hash
@@ -570,18 +585,19 @@ class SessionIndex:
                    ORDER BY f.path COLLATE session_path, r.source_offset"""
             ):
                 stable_session = stable_session_for(row)
-                stable_rate = rate_limit_key(
-                    stable_session,
-                    row["source_offset"],
-                    row["limit_id"],
-                    row["limit_name"],
-                    row["observed_at"],
-                    row["used_percent"],
-                    row["window_minutes"],
-                    row["resets_at"],
-                    row["resets_in_seconds"],
-                )
-                local_rate_keys.add(stable_rate)
+                if has_imported_rates:
+                    stable_rate = rate_limit_key(
+                        stable_session,
+                        row["source_offset"],
+                        row["limit_id"],
+                        row["limit_name"],
+                        row["observed_at"],
+                        row["used_percent"],
+                        row["window_minutes"],
+                        row["resets_at"],
+                        row["resets_in_seconds"],
+                    )
+                    local_rate_keys.add(stable_rate)
                 snapshot = RateLimitSnapshot(
                     limit_id=row["limit_id"],
                     limit_name=row["limit_name"],
@@ -647,6 +663,21 @@ class SessionIndex:
         from codex_glass.storage.compact import CompactHistory
 
         history = CompactHistory() if compact_events else None
+
+        def decorate(result):
+            if import_counts[0]:
+                result["source"].update(
+                    {
+                        "imported_sources": int(import_counts[0]),
+                        "imported_files": int(import_counts[1]),
+                        "imported_usage_events": int(import_counts[2]),
+                        "imported_rate_limit_snapshots": int(import_counts[3]),
+                    }
+                )
+            result["index"] = status.to_payload()
+            result["index"]["generation"] = generation
+            return result
+
         result = aggregate_usage_events(
             events,
             selected,
@@ -654,6 +685,8 @@ class SessionIndex:
             now=current_time,
             include_events=include_events,
             event_sink=history.append if history is not None else None,
+            summary_sink=(lambda result: summary_ready(decorate(result))) if summary_ready is not None else None,
+            progress=progress,
             source_metadata={"files": local_files},
             cwd_filter=cwd_filter,
         )
@@ -1536,6 +1569,8 @@ class IndexCoordinator:
         self._rebuild_pending = rebuild_index
         self._last_aggregate_key = None
         self._force_summary = False
+        self._aggregation_progress = {}
+        self._aggregation_started = None
         config = config_loader()
         # No database opening, validation, or history deserialization before bind.
         self._summary = aggregate_usage_events([], [], config, cwd_filter=cwd_filter)
@@ -1559,11 +1594,22 @@ class IndexCoordinator:
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             summary, status = self._summary, self._status_payload
+            aggregation = dict(self._aggregation_progress)
+            started = self._aggregation_started
         # Published objects are never mutated. Copy outside the lock so callers
         # can change their response without corrupting another request's data.
         result = copy.deepcopy(summary)
         result["index"] = copy.deepcopy(status)
+        if result["index"]["status"] == "aggregating":
+            result["index"].update(aggregation)
+            result["index"]["phase_elapsed_seconds"] = round(time.monotonic() - started, 1) if started else 0
         return result
+
+    def _report_aggregation(self, phase, processed, total):
+        if self._stop.is_set():
+            raise _StopIndexing()
+        with self._lock:
+            self._aggregation_progress = {"phase": phase, "phase_processed": processed, "phase_total": total}
 
     def events_snapshot(self) -> List[Dict[str, Any]]:
         """Return history separately so periodic data responses stay small."""
@@ -1745,7 +1791,16 @@ class IndexCoordinator:
                     if aggregate_key == self._last_aggregate_key and not forced:
                         self._publish(status)
                         continue
-                    summary = self.index.build_summary(config, cwd_filter=self.cwd_filter, compact_events=True)
+                    aggregating = replace(status, status="aggregating", complete=False)
+                    self._aggregation_started = time.monotonic()
+                    self._publish(aggregating)
+                    summary = self.index.build_summary(
+                        config,
+                        cwd_filter=self.cwd_filter,
+                        compact_events=True,
+                        summary_ready=lambda result: self._publish_summary(aggregating, result),
+                        progress=self._report_aggregation,
+                    )
                     if not self._publish_summary(status, summary):
                         self.request_refresh()
                     else:
