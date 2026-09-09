@@ -6,6 +6,22 @@ import sqlite3
 import json
 
 
+COST_ESTIMATE_NOTE = (
+    "按当前配置的文本 Token 单价重估，默认 Standard；非实际账单。\n"
+    "未区分 Fast / Batch / Flex，未单独计入缓存写入、图片、音频及工具费用。\n"
+    "未定价模型不计入金额；缓存已包含在输入中，推理已包含在输出中。"
+)
+
+
+def snapshot_status(row):
+    try:
+        stamp = datetime.fromisoformat(row["observed_at"])
+        age = (datetime.now(stamp.tzinfo) - stamp).total_seconds()
+        return "最近快照" if -60 <= age <= 300 else "快照较旧" if age > 300 else "时间异常"
+    except (ValueError, TypeError, KeyError):
+        return "时间未知"
+
+
 def compact(value):
     value = float(value or 0)
     for scale, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
@@ -53,7 +69,7 @@ def window_data(data, scope):
 
 
 def quota_windows(data):
-    """Only real account windows; never invent a 5-hour quota for a Pro account."""
+    """Only actual account windows; plan names never invent or suppress windows."""
     limits = (data.get("rate_limits") or {}).get("limits", [])
     primary = (data.get("rate_limits") or {}).get("primary")
     if not limits and primary:
@@ -70,8 +86,6 @@ def quota_windows(data):
             except (TypeError, ValueError):
                 continue
         minutes = row.get("window_minutes")
-        if str((data.get("rate_limits") or {}).get("plan_type", "")).lower() == "pro" and minutes != 10080:
-            continue
         if minutes in (300, 10080):
             found[minutes] = row
     return [

@@ -1439,12 +1439,8 @@ class SessionIndexer:
             return None
         plan = rate_limits.get("plan_type")
         plan = str(plan) if plan is not None else None
-        if (plan or "").lower() == "pro":
-            limits = [window for window in limits if window.get("window_minutes") == 10080]
-            windows = {name: window for name, window in windows.items() if window.get("window_minutes") == 10080}
-            if not limits:
-                return None
         return {
+            "window_policy": 2,
             "primary": windows.get("primary"),
             "secondary": windows.get("secondary"),
             "limits": limits,
@@ -1459,7 +1455,9 @@ class SessionIndexer:
                 """SELECT r.file_id,r.source_offset,r.observed_at,f.path
                      FROM rate_limit_snapshots r JOIN session_files f ON f.file_id=r.file_id
                 LEFT JOIN quota_cache q ON q.file_id=r.file_id
-                    WHERE q.file_id IS NULL AND f.missing=0
+                    WHERE (q.file_id IS NULL OR
+                           (q.payload_json LIKE '%"plan_type":"pro"%' AND
+                            q.payload_json NOT LIKE '%"window_policy":2%')) AND f.missing=0
                       AND (r.limit_id='codex' OR (r.limit_id IS NULL AND r.limit_name IS NULL))
                  ORDER BY r.observed_at DESC,r.source_offset DESC LIMIT 16"""
             ).fetchall()

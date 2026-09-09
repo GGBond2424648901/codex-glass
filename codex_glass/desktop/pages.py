@@ -18,7 +18,7 @@ from codex_glass.desktop.controls import (
     PresetButton,
 )
 from codex_glass.desktop.data import number, model_rows, cost_text, coverage, token_structure, color_for
-from codex_glass.core.presentation import window_data, quota_windows
+from codex_glass.core.presentation import window_data, quota_windows, snapshot_status, COST_ESTIMATE_NOTE
 
 
 def at(widget, rect):
@@ -48,15 +48,6 @@ def reset_label(row):
         )
     except (ValueError, TypeError, KeyError):
         return "重置时间未知"
-
-
-def snapshot_status(row):
-    try:
-        stamp = datetime.fromisoformat(row["observed_at"])
-        age = (datetime.now(stamp.tzinfo) - stamp).total_seconds()
-        return "最近快照" if -60 <= age <= 300 else "快照较旧" if age > 300 else "时间异常"
-    except (ValueError, TypeError, KeyError):
-        return "时间未知"
 
 
 class Page(QWidget):
@@ -94,6 +85,8 @@ class OverviewPage(Page):
             x = 23 + i * 309
             text(strip, title, (x, 15, 270, 30), 20, MUTED)
             self.metrics.append(text(strip, "—", (x, 44, 286, 62), 48, bold=True))
+            if i == 0:
+                self.metrics[-1].setToolTip(COST_ESTIMATE_NOTE)
             if i:
                 line(strip, x - 28, 25, 1).setFixedHeight(72)
         panel = self.panel((289, 249, 802, 357))

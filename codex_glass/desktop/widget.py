@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QSystemTrayIcon,
 )
-from codex_glass.core.presentation import compact, window_data, quota_windows
+from codex_glass.core.presentation import compact, window_data, quota_windows, snapshot_status, COST_ESTIMATE_NOTE
 from codex_glass.desktop.components.chart import GlassChart
 from codex_glass.desktop.components.style import (
     INK,
@@ -340,6 +340,7 @@ class GlassWidget(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(5000)
         self.timer.timeout.connect(self.fetch)
+        self.timer.timeout.connect(self.render_quota)
         self.timer.start()
         area = QApplication.primaryScreen().availableGeometry()
         self.move(area.right() - self.width() - 20, area.top() + 25)
@@ -456,6 +457,11 @@ class GlassWidget(QWidget):
         self.tokens.setToolTip(f'{total.get("total_tokens",0):,} Token')
         self.render_chart(animate)
         unpriced = {x.get("model") for x in self.data.get("pricing", {}).get("unpriced_models", [])}
+        partial = any(name in unpriced and row.get("total_tokens", 0) > 0 for name, row in models.items())
+        if partial:
+            self.cost_title.setText("部分预估")
+        self.cost.setToolTip(COST_ESTIMATE_NOTE)
+        self.cost_title.setToolTip(COST_ESTIMATE_NOTE)
         colors = {"gpt-6-astra": "#0ac5e3", "gpt-5.6-sol": "#a273fb", "gpt-5.6-terra": "#fa9981"}
         ordering = sorted(
             models,
@@ -531,6 +537,8 @@ class GlassWidget(QWidget):
     def render_quota(self):
         quotas = quota_windows(self.data)
         self.remaining = None
+        for target in (self.quota_label, self.quota_text, self.quota_reset, self.mini_quota):
+            target.setToolTip("")
         if not quotas:
             self.quota_label.setText("额度 · 暂无有效快照")
             self.quota_text.setText("—")
@@ -540,7 +548,10 @@ class GlassWidget(QWidget):
         title, row = quotas[0]
         self.remaining = max(0, min(100, 100 - float(row["used_percent"])))
         plan = str((self.data.get("rate_limits") or {}).get("plan_type") or "").upper()
-        self.quota_label.setText((plan + " · " if plan else "") + title)
+        status = snapshot_status(row)
+        self.quota_label.setText(
+            (plan + " · " if plan else "") + title + (" · " + status if status != "最近快照" else "")
+        )
         self.quota_text.setText(f'剩余 <b style="color:#087f79">{self.remaining:g}%</b>')
         self.mini_quota.setText(f"{self.remaining:g}%")
         reset = ""
@@ -557,11 +568,13 @@ class GlassWidget(QWidget):
                 pass
         self.quota_reset.setText(reset)
         tip = "\n".join(
-            f'{name}：剩余 {max(0,100-float(item["used_percent"])):g}%\n快照：{item.get("observed_at","未知")}'
+            f'{name}：剩余 {max(0,min(100,100-float(item["used_percent"]))):g}%\n'
+            f'{snapshot_status(item)}：{item.get("observed_at","未知")}\n重置：{item.get("resets_at") or "未知"}'
             for name, item in quotas
         )
-        self.quota_label.setToolTip(tip)
-        self.quota_text.setToolTip(tip)
+        tip += "\n本机会话快照，非实时查询；其他电脑的使用可能尚未同步。"
+        for target in (self.quota_label, self.quota_text, self.quota_reset, self.mini_quota):
+            target.setToolTip(tip)
         if len(quotas) > 1:
             hour = next((r for name, r in quotas if r.get("window_minutes") == 300), None)
             if hour:

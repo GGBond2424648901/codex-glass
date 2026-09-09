@@ -44,6 +44,30 @@ class GlassUITests(unittest.TestCase):
         self.widget.apply_data(telemetry())
         QTest.qWait(20)
 
+    def test_old_quota_is_visible_and_clears_after_fresh_or_missing_snapshot(self):
+        from datetime import datetime, timedelta
+
+        data = telemetry()
+        row = data["rate_limits"]["limits"][0]
+        row["observed_at"] = (datetime.now() - timedelta(minutes=10)).isoformat()
+        self.widget.apply_data(data)
+        self.assertIn("较旧", self.widget.quota_label.text())
+        self.assertIn("较旧", self.widget.mini_quota.toolTip())
+        row["observed_at"] = datetime.now().isoformat()
+        self.widget.apply_data(data)
+        self.assertNotIn("较旧", self.widget.quota_label.text())
+        self.widget.apply_data(dict(data, rate_limits=None))
+        self.assertEqual("", self.widget.quota_text.toolTip())
+
+    def test_unknown_model_in_scope_marks_partial_cost(self):
+        self.widget.scope = "all"
+        self.widget.apply_data(telemetry())
+        self.assertIn("部分", self.widget.cost_title.text())
+        self.assertIn("非实际账单", self.widget.cost.toolTip())
+        self.widget.scope = "today"
+        self.widget.render()
+        self.assertNotIn("部分", self.widget.cost_title.text())
+
     def test_pin_checked_shape_changes_and_window_flag_matches(self):
         from PyQt5.QtGui import QImage
 
