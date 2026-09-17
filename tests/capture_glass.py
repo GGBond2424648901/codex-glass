@@ -9,7 +9,7 @@ from PyQt5.QtCore import Qt, QRectF
 from PyQt5.QtGui import QPainter, QLinearGradient, QColor, QPainterPath, QImage
 from PyQt5.QtTest import QTest
 from codex_glass.desktop.widget import GlassWidget
-from tests.glass_fixtures import telemetry
+from tests.glass_fixtures import invocation_activity, telemetry
 
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parents[1] / "visual-evidence"
 output.mkdir(parents=True, exist_ok=True)
@@ -56,6 +56,16 @@ for scope in ("today", "last_5_hours", "all"):
     shot = w.screen().grabWindow(0, w.x(), w.y(), w.width(), w.height())
     shot.save(str(output / (scope + ".png")))
     captures.append(shot.toImage())
+activity = telemetry()
+activity["model_activity"] = invocation_activity()
+w.change_scope("today")
+w.apply_data(activity)
+QTest.qWait(150)
+w.grab().save(str(output / "invocation-compact.png"))
+w.invocation.toggle()
+QTest.qWait(150)
+w.grab().save(str(output / "invocation-expanded.png"))
+w.invocation.toggle()
 w.toggle_compact()
 QTest.qWait(150)
 w.screen().grabWindow(0, w.x(), w.y(), w.width(), w.height()).save(str(output / "mini.png"))

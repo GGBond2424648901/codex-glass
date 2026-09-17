@@ -42,6 +42,7 @@ docs/                      使用、性能、验收和演示截图
 | 需求 | 首先查看 |
 | --- | --- |
 | Token 解析与模型估算 | `core/usage.py` |
+| 主代理 / 子代理模型调用投影 | `core/invocations.py` |
 | 增量扫描、缓存与后台汇总 | `storage/index.py` |
 | 导入、去重、备份与来源 | `storage/history_import.py` |
 | 历史内存和分页 | `storage/compact.py` |

@@ -23,7 +23,7 @@ class GlassChart(QWidget):
         self.display_values = []
         self.start_values = []
         self.unit = "Token / min"
-        self.empty_text = "等待用量记录"
+        self._empty_text = "等待用量记录"
         self.motion = True
         self.live = False
         self.phase = 0
@@ -44,6 +44,17 @@ class GlassChart(QWidget):
         self.pulse.timeout.connect(self.tick)
         self.setMouseTracking(True)
         self.setAccessibleName("用量趋势图")
+
+    @property
+    def empty_text(self):
+        return self._empty_text
+
+    @empty_text.setter
+    def empty_text(self, value):
+        value = str(value)
+        if value != getattr(self, "_empty_text", None):
+            self._empty_text = value
+            self.repaint()
 
     def set_series(self, values, labels=None, animate=True, unit="Token / min"):
         clean = [max(0, float(v)) if math.isfinite(float(v)) else 0 for v in values]

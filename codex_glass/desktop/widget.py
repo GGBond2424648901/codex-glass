@@ -183,6 +183,136 @@ class ModelRow(QWidget):
             p.drawLine(0, h - 1, w, h - 1)
 
 
+class InvocationCard(QWidget):
+    """Compact live-call capsule with an in-place glass detail drawer."""
+
+    def __init__(self, toggle_callback, parent=None):
+        super().__init__(parent)
+        self.activity = {}
+        self.expanded = False
+        self.toggle_callback = toggle_callback
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName("当前模型调用")
+        self.setToolTip("显示主代理与子代理的请求模型；响应模型仅在会话明确记录时显示。")
+        self.hide()
+
+    def set_activity(self, activity):
+        self.activity = activity if isinstance(activity, dict) else {}
+        active = bool(self.activity.get("active") and self.activity.get("agents"))
+        if not active:
+            self.expanded = False
+        self.setVisible(active)
+        self.update()
+        return active
+
+    def drawer_height(self):
+        extra = 28 if len(self.activity.get("agents", [])) > 4 else 0
+        return 50 + min(4, len(self.activity.get("agents", []))) * 47 + 12 + extra
+
+    def toggle(self):
+        if not self.isVisible():
+            return
+        self.expanded = not self.expanded
+        self.toggle_callback(self.expanded)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.toggle()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Space):
+            self.toggle()
+        else:
+            super().keyPressEvent(event)
+
+    @staticmethod
+    def _status(agent):
+        response = agent.get("response_model_short")
+        if not response:
+            return "响应未记录", QColor(86, 111, 143), QColor(220, 231, 243, 190)
+        if agent.get("model_match") == "mismatch":
+            return response + " · 不一致", QColor(151, 91, 18), QColor(255, 213, 151, 205)
+        return "一致", QColor(0, 126, 107), QColor(139, 232, 203, 205)
+
+    def paintEvent(self, event):
+        agents = self.activity.get("agents", [])
+        if not agents:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w = self.width()
+        capsule = QRectF(0.5, 0.5, w - 1, 37)
+        p.setPen(QPen(QColor(255, 255, 255, 150), 1))
+        p.setBrush(QColor(235, 246, 255, 104 if not self.underMouse() else 140))
+        p.drawRoundedRect(capsule, 18.5, 18.5)
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(70, 228, 235, 52))
+        p.drawEllipse(QRectF(12, 7, 24, 24))
+        p.setBrush(QColor("#13cfe4"))
+        p.drawEllipse(QRectF(18, 13, 12, 12))
+        main = agents[0]
+        p.setFont(font(13, True))
+        p.setPen(QColor(INK))
+        p.drawText(QRectF(45, 5, 94, 29), Qt.AlignVCenter, "主  " + main.get("requested_model_short", "未知"))
+        p.setFont(font(17))
+        p.setPen(QColor("#426b9c"))
+        p.drawText(QRectF(137, 5, 25, 29), Qt.AlignCenter, "→")
+        status, status_ink, _ = self._status(main)
+        p.setFont(font(12, True))
+        p.setPen(status_ink)
+        p.drawText(QRectF(164, 5, 112, 29), Qt.AlignVCenter, status)
+        p.setPen(QColor(104, 135, 173, 65))
+        p.drawLine(281, 8, 281, 30)
+        children = max(0, len(agents) - 1)
+        p.setPen(QColor(INK))
+        p.drawText(QRectF(291, 5, 70, 29), Qt.AlignVCenter, f"子代理 {children}")
+        p.setPen(QPen(QColor(BLUE), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        y = 15 if self.expanded else 12
+        direction = -1 if self.expanded else 1
+        p.drawLine(w - 24, y, w - 18, y + 6 * direction)
+        p.drawLine(w - 18, y + 6 * direction, w - 12, y)
+
+        if not self.expanded:
+            return
+        drawer = QRectF(0.5, 44.5, w - 1, self.height() - 45)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(39, 78, 126, 24))
+        p.drawRoundedRect(drawer.translated(0, 4), 18, 18)
+        p.setPen(QPen(QColor(255, 255, 255, 185), 1))
+        p.setBrush(QColor(239, 248, 255, 250))
+        p.drawRoundedRect(drawer, 18, 18)
+        top = 52
+        for index, agent in enumerate(agents[:4]):
+            row_y = top + index * 47
+            if index:
+                p.setPen(QColor(120, 151, 184, 52))
+                p.drawLine(17, row_y, w - 17, row_y)
+            p.setFont(font(13, index == 0))
+            p.setPen(QColor(INK))
+            name = "主代理" if agent.get("role") == "main" else str(agent.get("name") or "子代理")
+            p.drawText(QRectF(18, row_y + 5, 92, 36), Qt.AlignVCenter, QFontMetrics(p.font()).elidedText(name, Qt.ElideRight, 88))
+            p.setFont(font(12, True))
+            model = str(agent.get("requested_model") or "未知")
+            p.drawText(QRectF(115, row_y + 5, 135, 36), Qt.AlignVCenter, QFontMetrics(p.font()).elidedText(model, Qt.ElideRight, 132))
+            text, ink, fill = self._status(agent)
+            if agent.get("role") == "subagent" and agent.get("status") == "running" and not agent.get("response_model"):
+                text, ink, fill = "运行中", QColor(BLUE), QColor(179, 221, 255, 205)
+            pill = QRectF(w - 120, row_y + 10, 101, 27)
+            p.setPen(Qt.NoPen)
+            p.setBrush(fill)
+            p.drawRoundedRect(pill, 13.5, 13.5)
+            p.setPen(ink)
+            p.setFont(font(11, True))
+            p.drawText(pill, Qt.AlignCenter, text)
+        if len(agents) > 4:
+            p.setPen(QColor(MUTED))
+            p.setFont(font(11))
+            p.drawText(QRectF(18, top + 4 * 47, w - 36, 24), Qt.AlignCenter, f"另有 {len(agents)-4} 个子代理")
+
+
 class GlassWidget(QWidget):
     FULL_SIZE = (440, 686)
 
@@ -253,6 +383,8 @@ class GlassWidget(QWidget):
             )
             b.clicked.connect(lambda checked=False, k=key: self.change_scope(k))
             self.group.addButton(b)
+        self.invocation = InvocationCard(self.toggle_invocation, self.body)
+        self.invocation.setGeometry(28, 52, 384, 38)
         self.cost_title = label(self, "预估费用", 16, MUTED)
         self.cost_title.setGeometry(32, 118, 245, 24)
         self.cost = label(self, "—", 48, bold=True)
@@ -308,6 +440,18 @@ class GlassWidget(QWidget):
         self.mini_quota = label(self, "—", 22, "#087f79", True)
         self.mini_quota.setGeometry(358, 68, 72, 36)
         self.mini_quota.hide()
+        self.mini_activity = QPushButton("", self)
+        self.mini_activity.setGeometry(174, 18, 124, 30)
+        self.mini_activity.setFont(font(11, True))
+        self.mini_activity.setCursor(Qt.PointingHandCursor)
+        self.mini_activity.setStyleSheet(
+            "QPushButton{color:#244a78;border:1px solid rgba(255,255,255,120);border-radius:14px;"
+            "background:rgba(235,248,255,100);padding:0 7px;}"
+            "QPushButton:hover{background:rgba(255,255,255,165);border-color:rgba(80,170,240,135);}"
+        )
+        self.mini_activity.setToolTip("展开查看当前主代理与子代理模型")
+        self.mini_activity.clicked.connect(self.show_invocation_from_mini)
+        self.mini_activity.hide()
         self.detail_popup = GlassInfoPopup(owner=self)
         self.detail_popup.setFixedWidth(355)
         self.menu = GlassMenu(owner=self)
@@ -391,6 +535,8 @@ class GlassWidget(QWidget):
         self.update()
         if self.appearance.isVisible():
             self.appearance.update()
+        if self.invocation.isVisible():
+            self.invocation.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -444,6 +590,57 @@ class GlassWidget(QWidget):
         if self.motion and old and old.get("total") != data.get("total"):
             self.flash.start()
 
+    def apply_model_activity(self):
+        active = self.invocation.set_activity(self.data.get("model_activity"))
+        agents = self.invocation.activity.get("agents", []) if active else []
+        main = agents[0] if agents else {}
+        children = max(0, len(agents) - 1)
+        self.mini_activity.setText(f'● {main.get("requested_model_short", "未知")} · 子{children}')
+        self.mini_activity.setVisible(active and self.compact_mode)
+        if not self.compact_mode:
+            self.set_invocation_layout(active)
+        if not active:
+            self.body.lower()
+
+    def set_invocation_layout(self, active):
+        if active:
+            self.cost_title.setGeometry(32, 150, 245, 24)
+            self.cost.setGeometry(30, 168, 255, 56)
+            self.tokens_title.setGeometry(284, 151, 121, 24)
+            self.tokens.setGeometry(283, 177, 124, 43)
+            self.chart_label.setGeometry(32, 174, 205, 25)
+            self.rate.setGeometry(284, 172, 123, 29)
+            self.range_box.setGeometry(315, 170, 90, 33)
+            self.chart.setGeometry(29, 206, 384, 126)
+            self.scroll.setGeometry(32, 342, 378, 196)
+        else:
+            self.cost_title.setGeometry(32, 118, 245, 24)
+            self.cost.setGeometry(30, 136, 255, 58)
+            self.tokens_title.setGeometry(284, 119, 121, 24)
+            self.tokens.setGeometry(283, 145, 124, 43)
+            self.chart_label.setGeometry(32, 154, 205, 25)
+            self.rate.setGeometry(284, 152, 123, 29)
+            self.range_box.setGeometry(315, 150, 90, 33)
+            self.chart.setGeometry(29, 190, 384, 137)
+            self.scroll.setGeometry(32, 340, 378, 198)
+        self.fit_metrics()
+
+    def toggle_invocation(self, expanded):
+        height = self.invocation.drawer_height() if expanded else 38
+        self.invocation.setGeometry(28, 52, 384, height)
+        if expanded:
+            self.body.raise_()
+        else:
+            self.body.lower()
+        self.invocation.raise_()
+
+    def show_invocation_from_mini(self):
+        if self.compact_mode:
+            self.toggle_compact()
+        self.invocation.expanded = True
+        self.toggle_invocation(True)
+        self.invocation.update()
+
     def render(self):
         if not self.data:
             return
@@ -456,6 +653,7 @@ class GlassWidget(QWidget):
         self.fit_metrics()
         self.tokens.setToolTip(f'{total.get("total_tokens",0):,} Token')
         self.render_chart(animate)
+        self.apply_model_activity()
         unpriced = {x.get("model") for x in self.data.get("pricing", {}).get("unpriced_models", [])}
         partial = any(name in unpriced and row.get("total_tokens", 0) > 0 for name, row in models.items())
         if partial:
@@ -558,7 +756,14 @@ class GlassWidget(QWidget):
             f'<b style="font-size:22px;color:{quota_ink}">{self.remaining:g}%</b>'
         )
         self.mini_quota.setStyleSheet(f"color:{quota_ink};background:transparent;")
-        self.mini_quota.setText(f"{self.remaining:g}%")
+        mini_quota_text = f"{self.remaining:g}%"
+        mini_quota_size = 22
+        while mini_quota_size > 15 and QFontMetrics(font(mini_quota_size, True)).horizontalAdvance(
+            mini_quota_text
+        ) > self.mini_quota.width():
+            mini_quota_size -= 1
+        self.mini_quota.setFont(font(mini_quota_size, True))
+        self.mini_quota.setText(mini_quota_text)
         reset = ""
         if row.get("resets_at"):
             try:
@@ -694,10 +899,14 @@ class GlassWidget(QWidget):
         self.tokens_title.setVisible(not self.compact_mode)
         self.mini_chart.setVisible(self.compact_mode)
         self.mini_quota.setVisible(self.compact_mode)
+        activity_active = bool(self.invocation.activity.get("active") and self.invocation.activity.get("agents"))
+        self.mini_activity.setVisible(self.compact_mode and activity_active)
         self.expand.setVisible(self.compact_mode)
         self.setFixedSize(440, 188 if self.compact_mode else self.FULL_SIZE[1])
         self.cost.setGeometry(30, 65, 158, 46) if self.compact_mode else self.cost.setGeometry(30, 136, 255, 58)
         self.tokens.setGeometry(212, 71, 94, 35) if self.compact_mode else self.tokens.setGeometry(283, 145, 124, 43)
+        if not self.compact_mode:
+            self.set_invocation_layout(activity_active)
         host = getattr(self, "scaled_host", None)
         if host:
             host.sync_size()

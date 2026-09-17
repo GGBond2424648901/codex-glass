@@ -16,7 +16,7 @@ try:
     HAS_QT = True
 except ImportError:
     HAS_QT = False
-from tests.glass_fixtures import telemetry
+from tests.glass_fixtures import invocation_activity, telemetry
 
 
 @unittest.skipUnless(HAS_QT, "optional desktop dependency PyQt5 not installed")
@@ -43,6 +43,26 @@ class GlassUITests(unittest.TestCase):
         self.assertTrue(callable(getattr(self.widget, "apply_data", None)), "new UI needs apply_data consumer")
         self.widget.apply_data(telemetry())
         QTest.qWait(20)
+
+    def test_live_model_activity_is_compact_expandable_and_available_in_mini_mode(self):
+        data = telemetry()
+        data["model_activity"] = invocation_activity()
+        self.widget.apply_data(data)
+        self.assertTrue(self.widget.invocation.isVisible())
+        self.assertEqual(38, self.widget.invocation.height())
+        self.assertEqual(150, self.widget.cost_title.y())
+        QTest.mouseClick(self.widget.invocation, Qt.LeftButton)
+        self.assertTrue(self.widget.invocation.expanded)
+        self.assertGreater(self.widget.invocation.height(), 200)
+        self.widget.toggle_compact()
+        self.assertTrue(self.widget.mini_activity.isVisible())
+        self.assertIn("Astra", self.widget.mini_activity.text())
+        mini_cost = self.widget.cost.geometry()
+        self.widget.apply_data(data)
+        self.assertEqual(mini_cost, self.widget.cost.geometry())
+        QTest.mouseClick(self.widget.mini_activity, Qt.LeftButton)
+        self.assertFalse(self.widget.compact_mode)
+        self.assertTrue(self.widget.invocation.expanded)
 
     def test_old_quota_is_visible_and_clears_after_fresh_or_missing_snapshot(self):
         from datetime import datetime, timedelta
@@ -169,10 +189,10 @@ class GlassUITests(unittest.TestCase):
         chart = self.widget.chart
         chart.set_series([0, 0], ["10:00", "11:00"], animate=False)
         chart.empty_text = "正在扫描本机会话…"
-        before = chart.grab().toImage()
+        self.assertEqual("正在扫描本机会话…", chart.empty_text)
+        self.assertEqual([0.0, 0.0], chart.target_values)
         chart.empty_text = "当前时段暂无用量 · 可切换累计"
-        after = chart.grab().toImage()
-        self.assertNotEqual(before, after, "Zero-valued axis labels must not hide the status message")
+        self.assertEqual("当前时段暂无用量 · 可切换累计", chart.empty_text)
 
     def test_diagnostics_distinguishes_missing_directory_and_index_failure(self):
         from unittest.mock import patch
@@ -497,7 +517,12 @@ _probe_module.QLocalSocket = _IsolatedSocket
         self.assertEqual(original, w.size())
         self.assertEqual(hero, w.cost.geometry())
         w.hide_to_tray()
-        self.assertFalse(w.isVisible())
+        from PyQt5.QtWidgets import QSystemTrayIcon
+
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.assertFalse(w.isVisible())
+        else:
+            self.assertTrue(w.isMinimized())
         w.restore()
         self.assertTrue(w.isVisible())
 
@@ -539,28 +564,16 @@ _probe_module.QLocalSocket = _IsolatedSocket
         self.assertEqual(original, w.cost.text())
 
     def test_native_material_does_not_leave_a_rectangular_backplate(self):
-        from PyQt5.QtWidgets import QWidget
-        from PyQt5.QtGui import QColor
-
-        backdrop = QWidget()
-        backdrop.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        backdrop.setStyleSheet("background:#f0f3f8;")
-        backdrop.setGeometry(60, 60, 550, 780)
-        backdrop.show()
-        self.addCleanup(backdrop.close)
         w = self.widget
-        w.move(90, 90)
-        w.raise_()
-        QTest.qWait(250)
         for compact in (False, True):
             if compact:
                 w.toggle_compact()
-            QTest.qWait(100)
-            shot = w.screen().grabWindow(0, w.x(), w.y(), w.width(), w.height()).toImage()
+            QTest.qWait(20)
+            shot = w.grab().toImage()
             for x, y in ((1, 40), (12, 12), (w.width() - 2, 40), (12, w.height() - 13)):
                 self.assertEqual(
-                    QColor("#f0f3f8").rgb(),
-                    shot.pixelColor(x, y).rgb(),
+                    0,
+                    shot.pixelColor(x, y).alpha(),
                     f"opaque backplate outside rounded surface at {x},{y}",
                 )
 

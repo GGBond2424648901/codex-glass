@@ -128,4 +128,10 @@ def desktop_snapshot(coordinator):
             pass
     else:
         result["rate_limits"] = data.get("rate_limits")
+    try:
+        from codex_glass.core.invocations import live_model_activity
+
+        result["model_activity"] = live_model_activity(index, getattr(coordinator, "sessions_dir", None))
+    except (OSError, RuntimeError, sqlite3.Error):
+        result["model_activity"] = {"active": False, "agents": [], "response_model_available": False}
     return result

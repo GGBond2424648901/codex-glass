@@ -32,6 +32,7 @@ monitor_config.json
 .worktrees/
 work/
 outputs/
+research/
 *.sqlite
 *.sqlite3
 *.db

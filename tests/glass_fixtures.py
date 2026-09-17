@@ -169,3 +169,53 @@ def telemetry():
             ],
         },
     }
+
+
+def invocation_activity():
+    return {
+        "active": True,
+        "response_model_available": True,
+        "evidence_note": "响应模型仅在会话明确记录 response.model 时显示",
+        "agents": [
+            {
+                "role": "main",
+                "name": "主代理",
+                "requested_model": "gpt-6-astra",
+                "requested_model_short": "Astra",
+                "response_model": None,
+                "response_model_short": None,
+                "model_match": "unknown",
+                "status": "running",
+            },
+            {
+                "role": "subagent",
+                "name": "Euler",
+                "requested_model": "gpt-6-astra",
+                "requested_model_short": "Astra",
+                "response_model": None,
+                "response_model_short": None,
+                "model_match": "unknown",
+                "status": "running",
+            },
+            {
+                "role": "subagent",
+                "name": "Nash",
+                "requested_model": "gpt-5.6-sol",
+                "requested_model_short": "Sol",
+                "response_model": "gpt-5.6-sol",
+                "response_model_short": "Sol",
+                "model_match": "match",
+                "status": "complete",
+            },
+            {
+                "role": "subagent",
+                "name": "Rawls",
+                "requested_model": "gpt-5.6-terra",
+                "requested_model_short": "Terra",
+                "response_model": None,
+                "response_model_short": None,
+                "model_match": "unknown",
+                "status": "complete",
+            },
+        ],
+    }
