@@ -23,8 +23,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8081
-PRICING_POLICY_VERSION = "2026-09-08-standard-text"
-PRICING_POLICY_CHECKED_ON = "2026-09-08"
+PRICING_POLICY_VERSION = "2026-09-23-standard-text"
+PRICING_POLICY_CHECKED_ON = "2026-09-23"
 
 
 BUILTIN_PRICING_PER_MILLION: Dict[str, "PricingRatesPerMillion"] = {}
@@ -106,13 +106,15 @@ class PricingRatesPerMillion:
         )
 
 
-# 内置 OpenAI 官方定价（来源：https://developers.openai.com/api/docs/pricing，核对日期：2026-09-08）
+# 内置 OpenAI 官方定价（来源：https://developers.openai.com/api/docs/pricing，核对日期：2026-09-23）
 # 说明：默认内置为 Text tokens 的 Standard tier（USD / 1M tokens）。
-# 对 Astra 与 GPT-5.4/5.5/5.6，会额外处理官方 long context (>272K input tokens) 加价规则。
+# 对 GPT-6 与 GPT-5.4/5.5/5.6，会额外处理官方 long context (>272K input tokens) 加价规则。
 # Codex CLI 的 model id 可能为别名，会通过 alias/规则映射到这些定价键。
 BUILTIN_PRICING_PER_MILLION = {
     # Current Codex models
     "gpt-6-astra": PricingRatesPerMillion(input=10.0, cached_input=1.0, output=50.0),
+    "gpt-6-sol": PricingRatesPerMillion(input=2.0, cached_input=0.2, output=10.0),
+    "gpt-6-luna": PricingRatesPerMillion(input=0.1, cached_input=0.01, output=0.5),
     "gpt-5.6-sol": PricingRatesPerMillion(input=4.0, cached_input=0.4, output=20.0),
     "gpt-5.6-terra": PricingRatesPerMillion(input=2.0, cached_input=0.2, output=12.0),
     "gpt-5.6-luna": PricingRatesPerMillion(input=0.2, cached_input=0.02, output=1.2),
@@ -269,7 +271,10 @@ def canonicalize_model_id(model: str) -> Optional[str]:
 
     # Published dated snapshots preserve the exact priced family. Do not use a
     # broad GPT-5 prefix here: new variants must remain unpriced until mapped.
-    for canonical in ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"):
+    for canonical in (
+        "gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+    ):
         if re.fullmatch(rf"{re.escape(canonical)}-\d{{4}}-\d{{2}}-\d{{2}}", m):
             return canonical
     if m.startswith(("gpt-5.5", "gpt-5.6")):
@@ -330,6 +335,8 @@ def _apply_long_context_pricing(
         pricing_key = None
     if pricing_key not in {
         "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
@@ -1245,7 +1252,7 @@ def aggregate_usage_events(
         "pricing": pricing,
         "rate_limits": rate_limits,
         "generated_at": current_time.isoformat(sep=" ", timespec="seconds"),
-        "note": "费用为按当前价格重估的估算值，不是历史账单：默认使用内置 OpenAI Standard tier 文本 token 定价（https://developers.openai.com/api/docs/pricing，2026-09-08 已核对）；也可在本地 monitor_config 配置中覆盖 pricing_per_million / model_aliases。未知模型保持未定价。路径与工作区名称默认已匿名化，便于公开展示。",
+        "note": "费用为按当前价格重估的估算值，不是历史账单：默认使用内置 OpenAI Standard tier 文本 token 定价（https://developers.openai.com/api/docs/pricing，2026-09-23 已核对）；也可在本地 monitor_config 配置中覆盖 pricing_per_million / model_aliases。未知模型保持未定价。路径与工作区名称默认已匿名化，便于公开展示。",
     }
 
     if summary_sink is not None:

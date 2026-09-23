@@ -39,7 +39,7 @@ def main(exe):
 
         write_records(sessions / "main.jsonl", [
             {"type": "session_meta", "payload": {"session_id": "smoke-main"}},
-            {"type": "turn_context", "payload": {"turn_id": "smoke-turn", "model": "gpt-6-astra"}},
+            {"type": "turn_context", "payload": {"turn_id": "smoke-turn", "model": "gpt-6-sol"}},
             {"type": "event_msg", "payload": {"type": "task_started"}},
             usage(100, 20, 60),
         ])
@@ -48,7 +48,7 @@ def main(exe):
                 "subagent": {"thread_spawn": {"parent_thread_id": "smoke-main", "agent_nickname": "Smoke"}}
             }}},
             {"type": "turn_context", "payload": {
-                "turn_id": "smoke-child-turn", "root_turn_id": "smoke-turn", "model": "gpt-5.6-sol"
+                "turn_id": "smoke-child-turn", "root_turn_id": "smoke-turn", "model": "gpt-6-luna"
             }},
             {"type": "event_msg", "payload": {"type": "task_started"}},
             usage(100, 50, 120),
@@ -85,7 +85,9 @@ def main(exe):
                 time.sleep(0.3)
             else:
                 raise RuntimeError(f"EXE backend did not return usage: {data and data.get('index')}")
-            assert data["server"]["version"] == "4.3.1", data["server"]
+            assert data["pricing"]["unpriced_calls"] == 0, data["pricing"]
+            assert abs(data["total"]["estimated_cost_usd"] - 0.0008295) < 1e-6, data["total"]
+            assert data["server"]["version"] == "4.3.2", data["server"]
             assert len(conversations) == 1, conversations
             result = conversations[0]
             assert result["conversation_id"] == "smoke-main", result
@@ -99,7 +101,7 @@ def main(exe):
                 env=environment, creationflags=flags, timeout=70, check=True,
             )
             assert desktop.returncode == 0 and capture.stat().st_size > 1000
-            print("EXE smoke OK: v4.3.1, 380 tokens, 3 tok/s, 35% cache, 2 agents, Qt capture")
+            print("EXE smoke OK: v4.3.2, GPT-6 Sol/Luna priced, 380 tokens, 3 tok/s, 35% cache, 2 agents, Qt capture")
         finally:
             if backend.poll() is None:
                 # The Windows one-file bootloader owns a child process. Stop only

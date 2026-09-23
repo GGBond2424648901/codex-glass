@@ -27,6 +27,8 @@ class CurrentPricingPolicyTests(unittest.TestCase):
         config = MonitorConfig.load(self.root / "missing.json")
         expected = {
             "gpt-6-astra": (10.0, 1.0, 50.0),
+            "gpt-6-sol": (2.0, 0.2, 10.0),
+            "gpt-6-luna": (0.1, 0.01, 0.5),
             "gpt-5.6-sol": (4.0, 0.4, 20.0),
             "gpt-5.6-terra": (2.0, 0.2, 12.0),
             "gpt-5.6-luna": (0.2, 0.02, 1.2),
@@ -45,7 +47,7 @@ class CurrentPricingPolicyTests(unittest.TestCase):
         aliased = replace(config, model_aliases={"my-sol": "gpt-5.6-sol"})
         rates, alias_source = aliased.rates_for_model("my-sol")
 
-        for model in ("gpt-5.6-sol-preview", "codex-auto-review"):
+        for model in ("gpt-6-sol-preview", "gpt-6-luna-fast", "gpt-5.6-sol-preview", "codex-auto-review"):
             with self.subTest(model=model):
                 _, unknown_source = config.rates_for_model(model)
                 self.assertEqual("unpriced", unknown_source)
@@ -56,6 +58,8 @@ class CurrentPricingPolicyTests(unittest.TestCase):
         config = MonitorConfig.load(self.root / "missing.json")
         expected = {
             "gpt-6-astra-2026-09-08": (10.0, 1.0, 50.0, "heuristic:gpt-6-astra"),
+            "gpt-6-sol-2026-09-22": (2.0, 0.2, 10.0, "heuristic:gpt-6-sol"),
+            "gpt-6-luna-2026-09-22": (0.1, 0.01, 0.5, "heuristic:gpt-6-luna"),
             "gpt-5.6-sol-2026-09-08": (4.0, 0.4, 20.0, "heuristic:gpt-5.6-sol"),
             "gpt-5.6-terra-2026-09-08": (2.0, 0.2, 12.0, "heuristic:gpt-5.6-terra"),
             "gpt-5.6-luna-2026-09-08": (0.2, 0.02, 1.2, "heuristic:gpt-5.6-luna"),
@@ -83,6 +87,40 @@ class CurrentPricingPolicyTests(unittest.TestCase):
 
         self.assertAlmostEqual(0.51, cost)
         self.assertEqual("direct", source)
+
+    def test_gpt6_sol_and_luna_short_context_costs_split_cached_input(self) -> None:
+        config = MonitorConfig.load(self.root / "missing.json")
+        for model, expected_cost in (("gpt-6-sol", 0.41), ("gpt-6-luna", 0.0205)):
+            with self.subTest(model=model):
+                cost, source = estimate_cost_usd(
+                    model,
+                    UsageDelta(input_tokens=200_000, cached_input_tokens=50_000, output_tokens=10_000),
+                    config,
+                )
+                self.assertAlmostEqual(expected_cost, cost)
+                self.assertEqual("direct", source)
+
+    def test_gpt6_sol_and_luna_long_context_reprices_full_request(self) -> None:
+        config = MonitorConfig.load(self.root / "missing.json")
+        for model, short_cost, long_cost in (
+            ("gpt-6-sol", 0.4244, 0.843804),
+            ("gpt-6-luna", 0.02122, 0.0421902),
+        ):
+            with self.subTest(model=model):
+                at_boundary, at_source = estimate_cost_usd(
+                    model,
+                    UsageDelta(input_tokens=272_000, cached_input_tokens=72_000, output_tokens=1_000),
+                    config,
+                )
+                over_boundary, over_source = estimate_cost_usd(
+                    model,
+                    UsageDelta(input_tokens=272_001, cached_input_tokens=72_000, output_tokens=1_000),
+                    config,
+                )
+                self.assertAlmostEqual(short_cost, at_boundary)
+                self.assertEqual("direct", at_source)
+                self.assertAlmostEqual(long_cost, over_boundary)
+                self.assertEqual("direct+long-context", over_source)
 
     def test_cached_input_cannot_exceed_total_input(self) -> None:
         config = MonitorConfig.load(self.root / "missing.json")
@@ -118,6 +156,8 @@ class CurrentPricingPolicyTests(unittest.TestCase):
         config = MonitorConfig.load(self.root / "missing.json")
         expected_costs = {
             "gpt-6-astra": 5.44002,
+            "gpt-6-sol": 1.088004,
+            "gpt-6-luna": 0.0544002,
             "gpt-5.6-sol": 2.176008,
             "gpt-5.6-terra": 1.088004,
             "gpt-5.6-luna": 0.1088004,
@@ -224,6 +264,34 @@ class PricingPolicyIndexTests(unittest.TestCase):
         self.assertAlmostEqual(0.001072, summary["total"]["estimated_cost_usd"])
         self.assertEqual("direct", summary["events"][0]["pricing_source"])
 
+    def test_indexed_gpt6_history_reprices_without_session_files(self) -> None:
+        for model in ("gpt-6-sol", "gpt-6-luna"):
+            records = sample_records()
+            records[1]["payload"]["model"] = model
+            for record in records:
+                record["timestamp"] = record["timestamp"].replace("2026-09-08", "2026-09-23")
+                usage = (record.get("payload") or {}).get("info", {}).get("total_token_usage")
+                if usage:
+                    for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"):
+                        usage[key] *= 1000
+            source_file = self.sessions / f"{model}.jsonl"
+            write_jsonl(source_file, records)
+        old_config = MonitorConfig("127.0.0.1", 8081, {}, {})
+        index_module.SessionIndexer(self.index, old_config).scan_once(self.sessions)
+        for source_file in self.sessions.iterdir():
+            source_file.unlink()
+
+        summary = self.index.build_summary(
+            MonitorConfig.load(self.root / "missing.json"),
+            now=datetime(2026, 9, 23, 10, 0, 0),
+            include_events=True,
+        )
+
+        self.assertAlmostEqual(0.536, summary["by_model"]["gpt-6-sol"]["estimated_cost_usd"])
+        self.assertAlmostEqual(0.0268, summary["by_model"]["gpt-6-luna"]["estimated_cost_usd"])
+        self.assertAlmostEqual(0.5628, summary["total"]["estimated_cost_usd"])
+        self.assertEqual(0, summary["pricing"]["unpriced_calls"])
+
 
 class PricingCoverageSummaryTests(unittest.TestCase):
     def test_summary_reports_known_price_coverage_from_resolution_source(self) -> None:
@@ -248,8 +316,8 @@ class PricingCoverageSummaryTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "policy_version": "2026-09-08-standard-text",
-                "policy_checked_on": "2026-09-08",
+                "policy_version": "2026-09-23-standard-text",
+                "policy_checked_on": "2026-09-23",
                 "method": "current-price-estimate",
                 "estimate_scope": "known-price-usage-only",
                 "priced_calls": 2,

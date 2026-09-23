@@ -8,7 +8,7 @@ Windows 原生悬浮组件与完整看板。展示模型 Token、美元费用估
 
 [下载 Windows EXE](https://github.com/GGBond2424648901/codex-glass/releases/latest) · [使用指南](DESKTOP_GUIDE_zh-CN.md) · [源码架构](docs/ARCHITECTURE.md) · [数据与隐私](PRIVACY.md) · [反馈问题](https://github.com/GGBond2424648901/codex-glass/issues)
 
-> **4.3.1 更新**：小窗口每 3 秒检查新用量，“近 60 秒”仅是各对话独立的速率统计窗口；有界逐行增量读取降低冷启动临时内存，并回收闲置采样缓存。数据仍由本机会话日志在调用结束后写入，不是逐 Token 流式速度。[更新记录](CHANGELOG.md) · [验收记录](docs/VERIFICATION.md)
+> **4.3.2 更新**：GPT‑6 Sol 与 Luna 加入官方 Standard 文本价格估算，涵盖缓存输入及长上下文；已有 SQLite 历史可按新策略重新计价。小窗口仍每 3 秒检查新用量，“近 60 秒”只是速率统计窗口。[更新记录](CHANGELOG.md) · [验收记录](docs/VERIFICATION.md)
 
 ![原生完整看板](docs/images/overview-today.png)
 
@@ -95,6 +95,7 @@ python desktop_widget.py --url http://127.0.0.1:8082 --no-start-backend
 
 - 使用本工具的 `codex-monitor.sqlite3` 索引，并非任意 Codex 内部 SQLite 都能直接读取。原始 Token 事实来自 `sessions`，不依赖账单 API。
 - 费用按当前配置的文本 Token 单价重新估算，默认 Standard，**不等于订阅实扣或实际账单**。未区分 Fast / Batch / Flex，未单独计入缓存写入、图片、音频及工具费用。未知模型显示“未计价”；小窗口当前范围包含未定价模型时显示“部分预估”。
+- GPT‑6 Sol / Luna 的 Standard 文本估价依据 [OpenAI Docs 官方定价](https://developers.openai.com/api/docs/pricing)：每百万 Token 的输入 / 缓存输入 / 输出分别为 Sol $2 / $0.20 / $10、Luna $0.10 / $0.01 / $0.50。输入超过 272K Token 的调用按官方长上下文价格估算。
 - 缓存包含在输入中，推理包含在输出中，不能重复相加。
 - 今日按本机自然日；5 小时回溯当前时间；累计覆盖全部已合并历史。曲线使用五分钟桶 Token/min 或每日 Token，空桶为 0。
 - 用量范围不等于账号额度。切换时间范围不改变当前额度或全局设置。
