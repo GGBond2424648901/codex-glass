@@ -93,7 +93,7 @@ def quota_windows(data):
     ]
 
 
-def desktop_snapshot(coordinator):
+def desktop_snapshot(coordinator, *, selected_conversation_id=None):
     data = coordinator.snapshot()
     result = {
         key: data[key]
@@ -131,7 +131,11 @@ def desktop_snapshot(coordinator):
     try:
         from codex_glass.core.invocations import live_model_activity
 
-        result["model_activity"] = live_model_activity(index, getattr(coordinator, "sessions_dir", None))
+        result["model_activity"] = live_model_activity(
+            index,
+            getattr(coordinator, "sessions_dir", None),
+            selected_conversation_id=selected_conversation_id,
+        )
     except (OSError, RuntimeError, sqlite3.Error):
         result["model_activity"] = {"active": False, "agents": [], "response_model_available": False}
     return result

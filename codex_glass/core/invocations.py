@@ -11,7 +11,7 @@ from heapq import nlargest
 from pathlib import Path
 from typing import Any, Iterable
 
-from codex_glass.core.live_telemetry import DEFAULT_SAMPLER, LiveTelemetrySampler
+from codex_glass.core.live_telemetry import DEFAULT_SAMPLER, LiveTelemetrySampler, _timestamp
 
 
 _TAIL_BYTES = 4 * 1024 * 1024
@@ -60,6 +60,7 @@ def _tail_records(path: Path) -> Iterable[dict[str, Any]]:
         b'"type":"task_complete"',
         b'"type":"turn_context"',
         b'"type":"response.completed"',
+        b'"type":"token_count"',
         b'"response"',
     )
     try:
@@ -112,6 +113,7 @@ def _reverse_metadata(path: Path) -> tuple[str | None, dict[str, Any] | None]:
     }
     turn_marker = b'"type":"turn_context"'
     task_state = None
+    task_position = None
     turn_position = None
     overlap = max(len(value) for value in (*task_markers.values(), turn_marker)) - 1
     try:
@@ -136,7 +138,8 @@ def _reverse_metadata(path: Path) -> tuple[str | None, dict[str, Any] | None]:
                         if marker in data
                     ]
                     if found:
-                        _position, task_state = max(found)
+                        position, task_state = max(found)
+                        task_position = start + position
                 if turn_position is None:
                     position = data.rfind(turn_marker)
                     if position >= 0:
@@ -146,6 +149,8 @@ def _reverse_metadata(path: Path) -> tuple[str | None, dict[str, Any] | None]:
                 end = start
     except OSError:
         return None, None
+    if task_state == "complete" and task_position is not None and turn_position is not None and turn_position > task_position:
+        task_state = None
     return task_state, _record_at(
         path, turn_position
     ) if turn_position is not None else None
@@ -181,6 +186,8 @@ def _session_projection(
         else None
     )
     last_task_event = None
+    last_usage_at = (previous or {}).get("last_usage_at")
+    last_turn_at = (previous or {}).get("last_turn_at")
     if previous and previous.get("status") in ("running", "complete"):
         last_task_event = (
             "task_started" if previous["status"] == "running" else "task_complete"
@@ -190,7 +197,10 @@ def _session_projection(
             record.get("payload") if isinstance(record.get("payload"), dict) else {}
         )
         if record.get("type") == "turn_context":
+            if last_task_event == "task_complete" and payload.get("turn_id") != (latest_turn or {}).get("turn_id"):
+                last_task_event = None
             latest_turn = payload
+            last_turn_at = _timestamp(record.get("timestamp"))
             requested_model = str(payload.get("model") or requested_model)
             response_model = None
         if record.get("type") == "event_msg" and payload.get("type") in (
@@ -198,6 +208,10 @@ def _session_projection(
             "task_complete",
         ):
             last_task_event = payload.get("type")
+        if (record.get("type") == "event_msg" and payload.get("type") == "token_count") or record.get("type") == "token_count":
+            stamp = _timestamp(record.get("timestamp"))
+            if stamp is not None:
+                last_usage_at = max(last_usage_at or stamp, stamp)
         response = payload.get("response")
         if isinstance(response, dict) and response.get("model"):
             response_model = str(response["model"])
@@ -221,6 +235,7 @@ def _session_projection(
             payload = fallback_turn.get("payload")
             if isinstance(payload, dict):
                 latest_turn = payload
+                last_turn_at = _timestamp(fallback_turn.get("timestamp"))
                 requested_model = str(payload.get("model") or requested_model)
 
     latest_turn = latest_turn or {}
@@ -253,6 +268,8 @@ def _session_projection(
         if last_task_event == "task_complete"
         else "unknown",
         "mtime_ns": int(mtime_ns or 0),
+        "last_usage_at": last_usage_at,
+        "last_turn_at": last_turn_at,
     }
 
 
@@ -303,7 +320,7 @@ def _recent_session_files(
             ranked = []
         paths = [item[2] for item in nlargest(limit, ranked)]
         with _CACHE_LOCK:
-            _DISCOVERY_CACHE[os.path.normcase(root)] = (now + 10.0, paths)
+            _DISCOVERY_CACHE[os.path.normcase(root)] = (now + 2.5, paths)
     result = []
     for path in paths:
         try:
@@ -318,6 +335,7 @@ def live_model_activity(
     sessions_dir: Path | None = None,
     max_candidates: int = 24,
     *,
+    selected_conversation_id: str | None = None,
     sampler: LiveTelemetrySampler | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
@@ -366,9 +384,10 @@ def live_model_activity(
                     "size": stat.st_size,
                 }
     rows = sorted(candidates.values(), key=lambda row: row["mtime_ns"], reverse=True)[
-        :max_candidates
+        : max_candidates * 2
     ]
     if not rows:
+        sampler.retain_paths([])
         return {"active": False, "agents": [], "conversations": [], "response_model_available": False}
 
     projected = []
@@ -385,6 +404,7 @@ def live_model_activity(
     mains = [item for item in projected if item["role"] == "main"]
     children = [item for item in projected if item["role"] == "subagent"]
     conversations = []
+    members_by_id = {}
     for main in mains:
         root_turn = main.get("root_turn_id") or main.get("turn_id")
         session_id = main.get("session_id")
@@ -407,35 +427,48 @@ def live_model_activity(
                 attached = True
             if not attached:
                 break
-        active = main["status"] == "running" or any(
-            item["status"] == "running" for item in related
-        )
+        def is_active(item):
+            stamp = max(
+                (value for value in (item.get("last_usage_at"), item.get("last_turn_at")) if value is not None),
+                default=None,
+            )
+            return item["status"] == "running" or (
+                item["status"] == "unknown" and stamp is not None and now - 30 <= stamp <= now + 5
+            )
+
+        active = is_active(main) or any(is_active(item) for item in related)
         if not active:
             continue
         related.sort(key=lambda item: (item["status"] != "running", -item["mtime_ns"]))
         members = [main] + related[:8]
-        agents = []
-        for item in members:
-            visible = {key: value for key, value in item.items() if key != "_path"}
-            visible["telemetry"] = sampler.sample(
-                item["_path"], now=now, active=item["status"] == "running"
-            )
-            agents.append(visible)
+        agents = [{key: value for key, value in item.items() if key != "_path"} for item in members]
         conversation_id = str(session_id or "local-" + hashlib.sha256(
             str(main["_path"]).encode("utf-8")
         ).hexdigest()[:12])
+        members_by_id[conversation_id] = members
         conversations.append({
             "conversation_id": conversation_id,
             "active": active,
             "agents": agents,
-            "telemetry": sampler.summarize(
-                [item["_path"] for item in members], now=now, active=active
-            ),
+            "telemetry": None,
             "last_activity_ns": max(item["mtime_ns"] for item in members),
             "response_model_available": any(item.get("response_model") for item in members),
         })
     conversations.sort(key=lambda item: item["last_activity_ns"], reverse=True)
-    selected = conversations[0] if conversations else None
+    selected = next(
+        (row for row in conversations if row["conversation_id"] == selected_conversation_id),
+        conversations[0] if conversations else None,
+    )
+    if selected is not None:
+        members = members_by_id[selected["conversation_id"]]
+        sampler.retain_paths([item["_path"] for item in members])
+        for visible, item in zip(selected["agents"], members):
+            visible["telemetry"] = sampler.sample(item["_path"], now=now, active=is_active(item))
+        selected["telemetry"] = sampler.summarize(
+            [item["_path"] for item in members], now=now, active=True
+        )
+    else:
+        sampler.retain_paths([])
     return {
         "active": bool(selected),
         "agents": selected["agents"] if selected else [],

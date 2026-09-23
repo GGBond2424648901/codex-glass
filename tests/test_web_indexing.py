@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -7,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from datetime import datetime, timezone
 from unittest import mock
 from urllib.request import Request, urlopen
 
@@ -189,6 +191,30 @@ class WebIndexingTests(unittest.TestCase):
         self.assertNotIn("events", data)
         self.assertIn("today", data["windows"])
         self.assertEqual([], data["rate_limits"]["limits"])
+
+    def test_widget_endpoint_samples_only_requested_conversation(self):
+        stamp = datetime.now(timezone.utc).isoformat()
+        for name, output in (("active-a", 60), ("active-b", 120)):
+            write_jsonl(self.sessions / f"{name}.jsonl", [
+                {"type": "session_meta", "payload": {"session_id": name}},
+                {"type": "turn_context", "payload": {"turn_id": name, "model": "gpt-6-astra"}},
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"timestamp": stamp, "type": "event_msg", "payload": {
+                    "type": "token_count", "info": {"total_token_usage": {
+                        "input_tokens": 100, "cached_input_tokens": 20, "output_tokens": output
+                    }}
+                }},
+            ])
+        earlier = time.time_ns() - 2_000_000_000
+        os.utime(self.sessions / "active-a.jsonl", ns=(earlier, earlier))
+        self.serve()
+        code, data = self.request("/api/widget?conversation_id=active-a")
+        self.assertEqual(200, code)
+        activity = data["model_activity"]
+        self.assertEqual("active-a", activity["selected_conversation_id"])
+        by_id = {row["conversation_id"]: row for row in activity["conversations"]}
+        self.assertEqual(1.0, by_id["active-a"]["telemetry"]["output_tps"])
+        self.assertIsNone(by_id["active-b"]["telemetry"])
 
     def test_refresh_returns_202_and_schedules_next_scan_without_waiting(self):
         entered, release, second = threading.Event(), threading.Event(), threading.Event()

@@ -58,7 +58,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/widget":
             from codex_glass.core.presentation import desktop_snapshot
 
-            data = desktop_snapshot(self.server.coordinator)
+            selected = (parse_qs(parsed.query).get("conversation_id", [""])[0] or "")[:128] or None
+            data = desktop_snapshot(self.server.coordinator, selected_conversation_id=selected)
             data["server"] = {"pid": os.getpid(), "build": _DASHBOARD_BUILD, "version": _VERSION}
             self._send(200, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return

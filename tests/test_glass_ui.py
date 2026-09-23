@@ -1,5 +1,6 @@
 import unittest
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -101,6 +102,72 @@ class GlassUITests(unittest.TestCase):
         self.widget.set_mini_telemetry_mode(False)
         self.assertTrue(self.widget.cost.isVisible())
         self.assertEqual("Token / min", self.widget.mini_chart.unit)
+
+    def test_switch_requests_selected_conversation_immediately(self):
+        data = telemetry()
+        first = invocation_activity()
+        second = invocation_activity()
+        first["conversation_id"] = "conversation-one"
+        second["conversation_id"] = "conversation-two"
+        data["model_activity"] = {"active": True, "agents": first["agents"], "conversations": [first, second]}
+        self.widget.apply_data(data)
+
+        class Recorder:
+            def __init__(self):
+                self.requests = []
+
+            def get(self, request):
+                self.requests.append(request)
+
+        recorder = Recorder()
+        original = self.widget.manager
+        self.widget.manager = recorder
+        self.addCleanup(setattr, self.widget, "manager", original)
+        self.widget.network_busy = False
+        self.widget.select_conversation("conversation-two")
+        self.assertEqual(1, len(recorder.requests))
+        self.assertIn("conversation_id=conversation-two", recorder.requests[0].url().toString())
+
+    def test_timer_tick_during_inflight_request_does_not_queue_extra_fetch(self):
+        self.widget.network_busy = True
+        self.widget.pending_fetch = False
+        self.widget.fetch()
+        self.assertFalse(self.widget.pending_fetch)
+
+    def test_switch_during_inflight_request_refreshes_new_selection_after_reply(self):
+        data = telemetry()
+        first = invocation_activity()
+        second = invocation_activity()
+        first["conversation_id"] = "conversation-one"
+        second["conversation_id"] = "conversation-two"
+        data["model_activity"] = {"active": True, "agents": first["agents"], "conversations": [first, second]}
+        self.widget.apply_data(data)
+        requested = []
+
+        class Recorder:
+            def get(self, request):
+                requested.append(request.url().toString())
+
+        class Reply:
+            def error(self):
+                return False
+
+            def readAll(self):
+                return json.dumps(data).encode("utf-8")
+
+            def deleteLater(self):
+                pass
+
+        original = self.widget.manager
+        self.widget.manager = Recorder()
+        self.addCleanup(setattr, self.widget, "manager", original)
+        self.widget.network_busy = True
+        self.widget.select_conversation("conversation-two")
+        self.assertEqual([], requested)
+        self.widget.received(Reply())
+        QTest.qWait(20)
+        self.assertEqual(1, len(requested))
+        self.assertIn("conversation_id=conversation-two", requested[0])
 
     def test_visible_widget_checks_for_new_usage_within_three_seconds(self):
         self.widget.timer.start()

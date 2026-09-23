@@ -78,6 +78,14 @@ class LiveTelemetrySampler:
         with self._lock:
             self._expire_idle_locked(now)
 
+    def retain_paths(self, paths: list[Path]) -> None:
+        """Keep token buffers only for the conversation currently being viewed."""
+        wanted = {str(Path(path)) for path in paths}
+        with self._lock:
+            for key in list(self._states):
+                if key not in wanted:
+                    self._states.pop(key, None)
+
     def _refresh(self, path: Path, now: float) -> _SessionState:
         key = str(path)
         state = self._states.get(key)

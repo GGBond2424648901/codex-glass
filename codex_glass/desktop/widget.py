@@ -4,7 +4,7 @@ import argparse, ctypes, json, os, re, socket as net_socket, subprocess, sys, ti
 from datetime import datetime
 from pathlib import Path
 from PyQt5 import sip
-from PyQt5.QtCore import QEvent, Qt, QTimer, QUrl, QPoint, QRectF, QSettings, QVariantAnimation
+from PyQt5.QtCore import QEvent, Qt, QTimer, QUrl, QUrlQuery, QPoint, QRectF, QSettings, QVariantAnimation
 from PyQt5.QtGui import QPainter, QPen, QColor, QIcon, QPixmap, QFontMetrics
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QLocalServer, QLocalSocket
 from PyQt5.QtWidgets import (
@@ -350,6 +350,7 @@ class GlassWidget(QWidget):
         self.compact_mode = False
         self.drag = None
         self.network_busy = False
+        self.pending_fetch = False
         self.backend_process = None
         self.backend_next_attempt = 0
         self.backend_attempts = 0
@@ -745,8 +746,11 @@ class GlassWidget(QWidget):
         self.conversation_menu.popup(self.global_point(source, QPoint(0, source.height() + 2)))
 
     def select_conversation(self, conversation_id):
+        if conversation_id == self.selected_conversation_id:
+            return
         self.selected_conversation_id = conversation_id
         self.apply_model_activity()
+        self.fetch(queue_if_busy=True)
 
     def set_mini_telemetry_mode(self, enabled):
         self.mini_telemetry_mode = bool(enabled)
@@ -1248,11 +1252,18 @@ class GlassWidget(QWidget):
             ]
         )
 
-    def fetch(self):
+    def fetch(self, *, queue_if_busy=False):
         if self.network_busy:
+            if queue_if_busy:
+                self.pending_fetch = True
             return
         self.network_busy = True
-        request = QNetworkRequest(QUrl(self.url + "/api/widget"))
+        url = QUrl(self.url + "/api/widget")
+        if self.selected_conversation_id:
+            query = QUrlQuery()
+            query.addQueryItem("conversation_id", self.selected_conversation_id)
+            url.setQuery(query)
+        request = QNetworkRequest(url)
         request.setTransferTimeout(10000)
         self.manager.get(request)
 
@@ -1278,6 +1289,9 @@ class GlassWidget(QWidget):
             self.launch_backend()
         finally:
             reply.deleteLater()
+            if self.pending_fetch:
+                self.pending_fetch = False
+                QTimer.singleShot(0, self.fetch)
 
 
 def main():
