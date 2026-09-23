@@ -296,7 +296,23 @@ class InvocationCard(QWidget):
             p.drawText(QRectF(18, row_y + 5, 92, 36), Qt.AlignVCenter, QFontMetrics(p.font()).elidedText(name, Qt.ElideRight, 88))
             p.setFont(font(12, True))
             model = str(agent.get("requested_model") or "未知")
-            p.drawText(QRectF(115, row_y + 5, 135, 36), Qt.AlignVCenter, QFontMetrics(p.font()).elidedText(model, Qt.ElideRight, 132))
+            p.drawText(QRectF(115, row_y + 2, 135, 21), Qt.AlignVCenter, QFontMetrics(p.font()).elidedText(model, Qt.ElideRight, 132))
+            sample = agent.get("telemetry") or {}
+            speed = sample.get("output_tps")
+            cache = sample.get("cache_hit_percent")
+            speed_text = (
+                f"{speed:g} tok/s" if isinstance(speed, (int, float))
+                else "已结束" if sample.get("status") == "inactive"
+                else "等待用量"
+            )
+            detail = (
+                speed_text
+                + "  ·  "
+                + (f"缓存 {cache:g}%" if isinstance(cache, (int, float)) else "缓存 —")
+            )
+            p.setFont(font(11))
+            p.setPen(QColor(MUTED))
+            p.drawText(QRectF(115, row_y + 24, 139, 17), Qt.AlignVCenter, QFontMetrics(p.font()).elidedText(detail, Qt.ElideRight, 137))
             text, ink, fill = self._status(agent)
             if agent.get("role") == "subagent" and agent.get("status") == "running" and not agent.get("response_model"):
                 text, ink, fill = "运行中", QColor(BLUE), QColor(179, 221, 255, 205)
@@ -328,6 +344,9 @@ class GlassWidget(QWidget):
         self.data = {}
         self.rows = {}
         self.selected = None
+        self.selected_conversation_id = None
+        self.mini_telemetry_mode = False
+        self.current_conversation = None
         self.compact_mode = False
         self.drag = None
         self.network_busy = False
@@ -365,6 +384,18 @@ class GlassWidget(QWidget):
         self.more = IconButton("more", "外观与菜单", self)
         self.more.move(386, 17)
         self.more.clicked.connect(self.show_menu)
+        self.conversation_button = QPushButton("", self)
+        self.conversation_button.setGeometry(175, 18, 159, 30)
+        self.conversation_button.setFont(font(11, True))
+        self.conversation_button.setCursor(Qt.PointingHandCursor)
+        self.conversation_button.setStyleSheet(
+            "QPushButton{color:#244a78;border:1px solid rgba(255,255,255,140);border-radius:14px;"
+            "background:rgba(235,248,255,115);padding:0 7px;}"
+            "QPushButton:hover{background:rgba(255,255,255,180);border-color:rgba(80,170,240,135);}"
+        )
+        self.conversation_button.setToolTip("切换当前对话；速率不会跨对话合并")
+        self.conversation_button.clicked.connect(self.show_conversation_menu)
+        self.conversation_button.hide()
         self.segments = QWidget(self.body)
         self.segments.setGeometry(28, 4, 384, 42)
         self.segments.setStyleSheet(
@@ -441,7 +472,7 @@ class GlassWidget(QWidget):
         self.mini_quota.setGeometry(358, 68, 72, 36)
         self.mini_quota.hide()
         self.mini_activity = QPushButton("", self)
-        self.mini_activity.setGeometry(174, 18, 124, 30)
+        self.mini_activity.setGeometry(174, 18, 82, 30)
         self.mini_activity.setFont(font(11, True))
         self.mini_activity.setCursor(Qt.PointingHandCursor)
         self.mini_activity.setStyleSheet(
@@ -450,8 +481,27 @@ class GlassWidget(QWidget):
             "QPushButton:hover{background:rgba(255,255,255,165);border-color:rgba(80,170,240,135);}"
         )
         self.mini_activity.setToolTip("展开查看当前主代理与子代理模型")
-        self.mini_activity.clicked.connect(self.show_invocation_from_mini)
+        self.mini_activity.clicked.connect(self.on_mini_activity)
         self.mini_activity.hide()
+        self.mini_page = QPushButton("速率", self)
+        self.mini_page.setGeometry(258, 18, 40, 30)
+        self.mini_page.setFont(font(11, True))
+        self.mini_page.setCursor(Qt.PointingHandCursor)
+        self.mini_page.setStyleSheet(self.mini_activity.styleSheet())
+        self.mini_page.setToolTip("切换总览 / 对话速率")
+        self.mini_page.clicked.connect(lambda: self.set_mini_telemetry_mode(not self.mini_telemetry_mode))
+        self.mini_page.hide()
+        self.mini_rate_caption = label(self, "近60秒输出", 12, MUTED)
+        self.mini_rate_caption.setGeometry(30, 63, 155, 20)
+        self.mini_rate_value = label(self, "—", 27, INK, True)
+        self.mini_rate_value.setGeometry(30, 82, 171, 34)
+        self.mini_cache_caption = label(self, "近5分钟缓存", 12, MUTED)
+        self.mini_cache_caption.setGeometry(205, 63, 106, 20)
+        self.mini_cache_value = label(self, "—", 26, BLUE, True)
+        self.mini_cache_value.setGeometry(205, 82, 100, 34)
+        for target in (self.mini_rate_caption, self.mini_rate_value, self.mini_cache_caption, self.mini_cache_value):
+            target.hide()
+        self.conversation_menu = GlassMenu(owner=self)
         self.detail_popup = GlassInfoPopup(owner=self)
         self.detail_popup.setFixedWidth(355)
         self.menu = GlassMenu(owner=self)
@@ -591,12 +641,42 @@ class GlassWidget(QWidget):
             self.flash.start()
 
     def apply_model_activity(self):
-        active = self.invocation.set_activity(self.data.get("model_activity"))
+        activity = self.data.get("model_activity") or {}
+        conversations = activity.get("conversations", []) if isinstance(activity, dict) else []
+        if not isinstance(conversations, list):
+            conversations = []
+        selected = next(
+            (row for row in conversations if row.get("conversation_id") == self.selected_conversation_id),
+            None,
+        )
+        if selected is None:
+            selected = conversations[0] if conversations else None
+            self.selected_conversation_id = selected.get("conversation_id") if selected else None
+        self.current_conversation = selected
+        active = self.invocation.set_activity(selected or activity)
         agents = self.invocation.activity.get("agents", []) if active else []
         main = agents[0] if agents else {}
         children = max(0, len(agents) - 1)
-        self.mini_activity.setText(f'● {main.get("requested_model_short", "未知")} · 子{children}')
+        if selected:
+            index = conversations.index(selected) + 1
+            total = len(conversations)
+            telemetry = selected.get("telemetry") or {}
+            value = telemetry.get("output_tps")
+            speed = f"{value:g} tok/s" if isinstance(value, (int, float)) else "等待用量"
+            self.conversation_button.setText(f"对话 {index}/{total} · {speed} ▾")
+            self.mini_activity.setText(
+                f"对话 {index}/{total} ▾" if self.mini_telemetry_mode
+                else f'{main.get("requested_model_short", "未知")} · 子{children}'
+            )
+        else:
+            self.conversation_button.setText("")
+            self.mini_activity.setText(f'● {main.get("requested_model_short", "未知")} · 子{children}')
+        self.conversation_button.setVisible(bool(selected) and not self.compact_mode)
         self.mini_activity.setVisible(active and self.compact_mode)
+        self.mini_activity.setToolTip(
+            "切换当前对话；速率不跨对话合并" if self.mini_telemetry_mode else "展开查看当前主代理与子代理模型"
+        )
+        self.render_telemetry()
         if not self.compact_mode:
             self.set_invocation_layout(active)
         if not active:
@@ -640,6 +720,72 @@ class GlassWidget(QWidget):
         self.invocation.expanded = True
         self.toggle_invocation(True)
         self.invocation.update()
+
+    def on_mini_activity(self):
+        if self.mini_telemetry_mode and self.current_conversation:
+            self.show_conversation_menu()
+        else:
+            self.show_invocation_from_mini()
+
+    def show_conversation_menu(self):
+        conversations = (self.data.get("model_activity") or {}).get("conversations", [])
+        if not conversations:
+            return
+        self.conversation_menu.clear()
+        for index, row in enumerate(conversations, 1):
+            agent = (row.get("agents") or [{}])[0]
+            model = agent.get("requested_model_short") or "未知"
+            action = self.conversation_menu.addAction(f"对话 {index} · {model}")
+            action.setCheckable(True)
+            action.setChecked(row.get("conversation_id") == self.selected_conversation_id)
+            action.triggered.connect(
+                lambda _checked=False, cid=row.get("conversation_id"): self.select_conversation(cid)
+            )
+        source = self.mini_activity if self.compact_mode else self.conversation_button
+        self.conversation_menu.popup(self.global_point(source, QPoint(0, source.height() + 2)))
+
+    def select_conversation(self, conversation_id):
+        self.selected_conversation_id = conversation_id
+        self.apply_model_activity()
+
+    def set_mini_telemetry_mode(self, enabled):
+        self.mini_telemetry_mode = bool(enabled)
+        showing = self.compact_mode and self.mini_telemetry_mode
+        self.mini_page.setText("总览" if showing else "速率")
+        for target in (self.mini_rate_caption, self.mini_rate_value, self.mini_cache_caption, self.mini_cache_value):
+            target.setVisible(showing)
+        self.cost.setVisible(not showing)
+        self.tokens.setVisible(not showing)
+        if self.compact_mode:
+            self.render_chart(False)
+        self.apply_model_activity()
+
+    def render_telemetry(self):
+        telemetry = (self.current_conversation or {}).get("telemetry") or {}
+        value = telemetry.get("output_tps")
+        cache = telemetry.get("cache_hit_percent")
+        self.mini_rate_caption.setText(
+            "近60秒输出" if value is not None
+            else "生成中 · 等待用量" if self.current_conversation
+            else "暂无活动对话"
+        )
+        rate_text = f"{value:g} tok/s" if isinstance(value, (int, float)) else "—"
+        self.mini_rate_value.setText(rate_text)
+        size = 27
+        while size > 17 and QFontMetrics(font(size, True)).horizontalAdvance(rate_text) > self.mini_rate_value.width():
+            size -= 1
+        self.mini_rate_value.setFont(font(size, True))
+        self.mini_cache_value.setText(f"{cache:g}%" if isinstance(cache, (int, float)) else "—")
+        status = "最近调用完成后更新" if value is not None else "生成中 · 等待用量记录"
+        note = (
+            f"{status}\n同一对话的主代理与子代理合计；每个对话单独统计。"
+            "\n缓存命中 = 近5分钟缓存输入 / 总输入；来自调用完成后的本机记录。"
+        )
+        for target in (self.mini_rate_caption, self.mini_rate_value, self.mini_cache_caption, self.mini_cache_value):
+            target.setToolTip(note)
+        if self.compact_mode and self.mini_telemetry_mode:
+            self.mini_chart.set_series(telemetry.get("trend_5s_output") or [], animate=self.motion, unit="5秒输出 Token")
+            self.mini_chart.setToolTip(note)
 
     def render(self):
         if not self.data:
@@ -899,8 +1045,10 @@ class GlassWidget(QWidget):
         self.tokens_title.setVisible(not self.compact_mode)
         self.mini_chart.setVisible(self.compact_mode)
         self.mini_quota.setVisible(self.compact_mode)
+        self.mini_page.setVisible(self.compact_mode)
         activity_active = bool(self.invocation.activity.get("active") and self.invocation.activity.get("agents"))
         self.mini_activity.setVisible(self.compact_mode and activity_active)
+        self.conversation_button.setVisible(not self.compact_mode and bool(self.current_conversation))
         self.expand.setVisible(self.compact_mode)
         self.setFixedSize(440, 188 if self.compact_mode else self.FULL_SIZE[1])
         self.cost.setGeometry(30, 65, 158, 46) if self.compact_mode else self.cost.setGeometry(30, 136, 255, 58)
@@ -912,6 +1060,7 @@ class GlassWidget(QWidget):
             host.sync_size()
             host.clamp_to_screen()
         self.fit_metrics()
+        self.set_mini_telemetry_mode(self.mini_telemetry_mode)
         self.update()
 
     def show_menu(self):

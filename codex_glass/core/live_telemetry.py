@@ -1,0 +1,203 @@
+"""Bounded, incremental, per-session usage telemetry from local Codex logs.
+
+These are completed-call observations, not streaming token events. Non-usage
+lines are filtered early; chat content is never retained.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+_COLD_TAIL_BYTES = 4 * 1024 * 1024
+_MAX_RECORD_BYTES = 1024 * 1024
+_RETENTION_SECONDS = 300
+_USAGE_RECORD_HEAD = re.compile(rb'"type"\s*:\s*"(?:event_msg|token_count)"')
+
+
+@dataclass
+class _SessionState:
+    offset: int = 0
+    mtime_ns: int = 0
+    partial: bytes = b""
+    total: tuple[int, int, int] | None = None
+    from_start: bool = True
+    samples: deque[tuple[float, int, int, int]] = field(default_factory=deque)
+    last_access: float = 0.0
+
+
+def _timestamp(value: object) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _counts(value: object) -> tuple[int, int, int] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        numbers = tuple(int(value.get(key, 0)) for key in (
+            "input_tokens", "cached_input_tokens", "output_tokens"
+        ))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if any(number < 0 for number in numbers):
+        return None
+    return numbers[0], min(numbers[0], numbers[1]), numbers[2]
+
+
+class LiveTelemetrySampler:
+    """Small per-file state; reads a bounded cold tail and only appended bytes later."""
+
+    def __init__(self):
+        self._states: dict[str, _SessionState] = {}
+        self._lock = threading.Lock()
+
+    def _refresh(self, path: Path, now: float) -> _SessionState:
+        key = str(path)
+        state = self._states.get(key)
+        try:
+            stat = path.stat()
+            size = stat.st_size
+        except OSError:
+            self._states.pop(key, None)
+            return _SessionState()
+        if state is None or size < state.offset or (
+            size == state.offset and state.mtime_ns != stat.st_mtime_ns
+        ):
+            state = _SessionState()
+            self._states[key] = state
+        start = state.offset
+        skipped = False
+        if size - start > _COLD_TAIL_BYTES:
+            start = size - _COLD_TAIL_BYTES
+            skipped = True
+            state.partial = b""
+            state.total = None
+            state.from_start = False
+        try:
+            with path.open("rb") as stream:
+                stream.seek(start)
+                data = stream.read(size - start)
+        except OSError:
+            return state
+        state.offset = start + len(data)
+        state.mtime_ns = stat.st_mtime_ns
+        if skipped:
+            newline = data.find(b"\n")
+            data = data[newline + 1:] if newline >= 0 else b""
+        elif state.partial:
+            data = state.partial + data
+        lines = data.split(b"\n")
+        state.partial = lines.pop() if lines else b""
+        if len(state.partial) > _MAX_RECORD_BYTES:
+            state.partial = b""
+        for raw in lines:
+            if (
+                len(raw) > _MAX_RECORD_BYTES
+                or b'token_count' not in raw
+                or _USAGE_RECORD_HEAD.search(raw[:192]) is None
+            ):
+                continue
+            try:
+                record = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError, MemoryError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            payload = record.get("payload")
+            if record.get("type") == "event_msg":
+                if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info")
+            elif record.get("type") == "token_count":
+                info = payload.get("info") if isinstance(payload, dict) else record.get("info")
+            else:
+                continue
+            if not isinstance(info, dict):
+                continue
+            total = _counts(info.get("total_token_usage"))
+            last = _counts(info.get("last_token_usage"))
+            if total is None and last is None:
+                continue
+            if total is not None and state.total == total:
+                continue
+            if total is not None and state.total is not None:
+                delta = tuple(max(0, current - previous) for current, previous in zip(total, state.total))
+            elif last is not None:
+                delta = last
+            elif state.from_start:
+                delta = total
+            else:
+                # The cold tail began midway through cumulative history.
+                state.total = total
+                continue
+            if total is not None:
+                state.total = total
+            timestamp = _timestamp(record.get("timestamp"))
+            if timestamp is None or timestamp > now + 5 or timestamp < now - _RETENTION_SECONDS:
+                continue
+            if delta is not None and any(delta):
+                state.samples.append((timestamp, *delta))
+        state.last_access = now
+        self._prune(state, now)
+        if len(self._states) > 64:
+            oldest = sorted(self._states, key=lambda item: self._states[item].last_access)
+            for stale in oldest[:-64]:
+                self._states.pop(stale, None)
+        return state
+
+    @staticmethod
+    def _prune(state: _SessionState, now: float) -> None:
+        while state.samples and state.samples[0][0] < now - _RETENTION_SECONDS:
+            state.samples.popleft()
+        while len(state.samples) > 2048:
+            state.samples.popleft()
+
+    def summarize(self, paths: list[Path], *, now: float | None = None, active: bool = True) -> dict:
+        """Aggregate only the explicitly related sessions passed by the caller."""
+        now = time.time() if now is None else now
+        with self._lock:
+            samples: list[tuple[float, int, int, int]] = []
+            for path in dict.fromkeys(paths):
+                samples.extend(self._refresh(Path(path), now).samples)
+        recent = [item for item in samples if now - 60 <= item[0] <= now + 5]
+        cache_window = [item for item in samples if now - 300 <= item[0] <= now + 5]
+        output = sum(item[3] for item in recent)
+        inputs = sum(item[1] for item in cache_window)
+        cached = sum(item[2] for item in cache_window)
+        last_at = max((item[0] for item in samples), default=None)
+        bins = [0] * 12
+        for timestamp, _input, _cache, count in recent:
+            position = min(11, max(0, int((timestamp - (now - 60)) // 5)))
+            bins[position] += count
+        return {
+            "status": "recent" if active and recent else "awaiting_usage" if active else "inactive",
+            "output_tps": round(output / 60, 2) if active and recent else None,
+            "output_tokens_60s": output if active and recent else 0,
+            "cache_hit_percent": round(100 * cached / inputs, 1) if inputs else None,
+            "cached_input_tokens_5m": cached,
+            "input_tokens_5m": inputs,
+            "last_usage_at": datetime.fromtimestamp(last_at, timezone.utc).isoformat() if last_at else None,
+            "trend_5s_output": bins,
+            "source": "local_completed_call_usage",
+        }
+
+    def sample(self, path: Path, *, now: float | None = None, active: bool = True) -> dict:
+        return self.summarize([path], now=now, active=active)
+
+
+DEFAULT_SAMPLER = LiveTelemetrySampler()

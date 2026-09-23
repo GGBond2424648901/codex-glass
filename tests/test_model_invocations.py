@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from codex_glass.core.invocations import live_model_activity, short_model_name
+from codex_glass.core.live_telemetry import LiveTelemetrySampler
 
 
 class _Reader:
@@ -213,6 +214,59 @@ class ModelInvocationTests(unittest.TestCase):
             self.assertEqual("gpt-6-astra", result["agents"][0]["requested_model"])
             self.assertIsNone(result["agents"][0]["response_model"])
             self.assertEqual("unknown", result["agents"][0]["model_match"])
+
+    def test_two_conversations_and_their_children_never_mix_throughput(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = []
+            for suffix, output, child_output in (("a", 60, 30), ("b", 120, 180)):
+                main = root / f"main-{suffix}.jsonl"
+                child = root / f"child-{suffix}.jsonl"
+                base = {"timestamp": "2026-09-23T00:00:20Z"}
+                _write(main, [
+                    {"type": "session_meta", "payload": {"session_id": f"root-{suffix}"}},
+                    {"type": "turn_context", "payload": {"turn_id": f"turn-{suffix}", "model": "gpt-6-astra"}},
+                    {"type": "event_msg", "payload": {"type": "task_started"}},
+                    dict(base, type="event_msg", payload={"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": output}
+                    }}),
+                ])
+                _write(child, [
+                    {"type": "session_meta", "payload": {"session_id": f"child-{suffix}", "source": {
+                        "subagent": {"thread_spawn": {"parent_thread_id": f"root-{suffix}", "agent_nickname": f"Agent-{suffix}"}}
+                    }}},
+                    {"type": "turn_context", "payload": {"turn_id": f"child-turn-{suffix}", "root_turn_id": f"turn-{suffix}", "model": "gpt-5.6-sol"}},
+                    {"type": "event_msg", "payload": {"type": "task_started"}},
+                    dict(base, type="event_msg", payload={"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 200, "cached_input_tokens": 100, "output_tokens": child_output}
+                    }}),
+                ])
+                rows.extend([
+                    {"path": str(main), "last_model": "gpt-6-astra", "mtime_ns": 2 if suffix == "b" else 1},
+                    {"path": str(child), "last_model": "gpt-5.6-sol", "mtime_ns": 2 if suffix == "b" else 1},
+                ])
+            nested = root / "nested-a.jsonl"
+            _write(nested, [
+                {"type": "session_meta", "payload": {"session_id": "nested-a", "source": {
+                    "subagent": {"thread_spawn": {"parent_thread_id": "child-a", "agent_nickname": "Nested"}}
+                }}},
+                {"type": "turn_context", "payload": {"turn_id": "nested-turn", "root_turn_id": "turn-a", "model": "gpt-5.6-terra"}},
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"timestamp": "2026-09-23T00:00:20Z", "type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 30}
+                }}},
+            ])
+            rows.append({"path": str(nested), "last_model": "gpt-5.6-terra", "mtime_ns": 1})
+            result = live_model_activity(_Index(rows), sampler=LiveTelemetrySampler(), now=1790121630)
+            conversations = {row["conversation_id"]: row for row in result["conversations"]}
+            self.assertEqual({"root-a", "root-b"}, set(conversations))
+            self.assertEqual(2.0, conversations["root-a"]["telemetry"]["output_tps"])
+            self.assertEqual(5.0, conversations["root-b"]["telemetry"]["output_tps"])
+            self.assertEqual(1.0, conversations["root-a"]["agents"][0]["telemetry"]["output_tps"])
+            self.assertEqual(0.5, conversations["root-a"]["agents"][1]["telemetry"]["output_tps"])
+            self.assertEqual(3, len(conversations["root-a"]["agents"]))
+            self.assertEqual(40.0, conversations["root-a"]["telemetry"]["cache_hit_percent"])
+            self.assertEqual(2, len(result["conversations"]))
 
 
 if __name__ == "__main__":

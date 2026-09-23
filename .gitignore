@@ -32,6 +32,8 @@ monitor_config.json
 .worktrees/
 work/
 outputs/
+visual-evidence*/
+docs/superpowers/
 research/
 *.sqlite
 *.sqlite3

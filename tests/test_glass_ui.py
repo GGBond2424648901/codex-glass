@@ -64,6 +64,44 @@ class GlassUITests(unittest.TestCase):
         self.assertFalse(self.widget.compact_mode)
         self.assertTrue(self.widget.invocation.expanded)
 
+    def test_mini_telemetry_and_conversation_selection_stay_separate(self):
+        data = telemetry()
+        first = invocation_activity()
+        second = invocation_activity()
+        first["conversation_id"] = "conversation-one"
+        second["conversation_id"] = "conversation-two"
+        first["telemetry"] = {
+            "status": "recent", "output_tps": 1.5, "cache_hit_percent": 40.0,
+            "trend_5s_output": [0, 0, 60, 30] + [0] * 8,
+        }
+        second["telemetry"] = {
+            "status": "recent", "output_tps": 5.0, "cache_hit_percent": 60.0,
+            "trend_5s_output": [0, 0, 120, 180] + [0] * 8,
+        }
+        data["model_activity"] = {
+            "active": True, "agents": first["agents"],
+            "conversations": [first, second],
+        }
+        self.widget.apply_data(data)
+        self.assertTrue(self.widget.conversation_button.isVisible())
+        self.assertIn("1/2", self.widget.conversation_button.text())
+        self.widget.select_conversation("conversation-two")
+        self.assertIn("2/2", self.widget.conversation_button.text())
+        self.widget.toggle_compact()
+        self.widget.set_mini_telemetry_mode(True)
+        self.assertFalse(self.widget.cost.isVisible())
+        self.assertFalse(self.widget.tokens.isVisible())
+        self.assertTrue(self.widget.mini_rate_value.isVisible())
+        self.assertIn("5", self.widget.mini_rate_value.text())
+        self.assertEqual("60%", self.widget.mini_cache_value.text())
+        self.assertTrue(self.widget.mini_quota.isVisible())
+        self.assertEqual("5秒输出 Token", self.widget.mini_chart.unit)
+        self.widget.apply_data(data)
+        self.assertEqual("conversation-two", self.widget.selected_conversation_id)
+        self.widget.set_mini_telemetry_mode(False)
+        self.assertTrue(self.widget.cost.isVisible())
+        self.assertEqual("Token / min", self.widget.mini_chart.unit)
+
     def test_old_quota_is_visible_and_clears_after_fresh_or_missing_snapshot(self):
         from datetime import datetime, timedelta
 

@@ -70,6 +70,38 @@ w.toggle_compact()
 QTest.qWait(150)
 w.screen().grabWindow(0, w.x(), w.y(), w.width(), w.height()).save(str(output / "mini.png"))
 w.toggle_compact()
+two = telemetry()
+first = invocation_activity()
+second = invocation_activity()
+for index, item in enumerate((first, second), 1):
+    item["conversation_id"] = f"visual-conversation-{index}"
+    item["telemetry"] = {
+        "status": "recent", "output_tps": 3.2 if index == 1 else 8.4,
+        "cache_hit_percent": 68.0 if index == 1 else 82.0,
+        "trend_5s_output": [0, 1, 3, 2, 7, 11, 5, 9, 13, 7, 5, 12],
+    }
+    item["agents"][0]["telemetry"] = {
+        "output_tps": 2.1 if index == 1 else 5.0, "cache_hit_percent": 70.0
+    }
+    item["agents"][1]["telemetry"] = {
+        "output_tps": 1.1 if index == 1 else 3.4, "cache_hit_percent": 64.0
+    }
+two["model_activity"] = {
+    "active": True, "agents": first["agents"], "conversations": [first, second]
+}
+w.apply_data(two)
+w.select_conversation("visual-conversation-2")
+w.invocation.expanded = True
+w.toggle_invocation(True)
+QTest.qWait(150)
+w.grab().save(str(output / "conversation-telemetry-expanded.png"))
+w.invocation.expanded = False
+w.toggle_invocation(False)
+w.toggle_compact()
+w.set_mini_telemetry_mode(True)
+QTest.qWait(150)
+w.grab().save(str(output / "conversation-telemetry-mini.png"))
+w.toggle_compact()
 w.appearance.move(570, 180)
 w.appearance.show()
 QTest.qWait(300)
@@ -85,6 +117,15 @@ p.end()
 sheet.save(str(output / "three-pages.png"))
 print("Captured three pages, mini, appearance. Native DWM request accepted:", w.blur_active)
 w.appearance.hide()
+from codex_glass.desktop.components.host import ScaledSurfaceHost
+
+w.toggle_compact()
+w.set_mini_telemetry_mode(True)
+scaled = ScaledSurfaceHost(w, scale=0.55, min_scale=0.55, max_scale=1.5)
+scaled.show()
+QTest.qWait(180)
+scaled.grab().save(str(output / "conversation-telemetry-mini-55pct.png"))
+scaled.hide()
 w.tray.hide()
 w.hide()
 bg.hide()

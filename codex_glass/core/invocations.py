@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -9,6 +10,8 @@ import time
 from heapq import nlargest
 from pathlib import Path
 from typing import Any, Iterable
+
+from codex_glass.core.live_telemetry import DEFAULT_SAMPLER, LiveTelemetrySampler
 
 
 _TAIL_BYTES = 4 * 1024 * 1024
@@ -311,9 +314,17 @@ def _recent_session_files(
 
 
 def live_model_activity(
-    index: Any, sessions_dir: Path | None = None, max_candidates: int = 16
+    index: Any,
+    sessions_dir: Path | None = None,
+    max_candidates: int = 24,
+    *,
+    sampler: LiveTelemetrySampler | None = None,
+    now: float | None = None,
 ) -> dict[str, Any]:
-    """Return the newest active root turn and related agents without reading chat content."""
+    """Project active root conversations and their own child usage samples."""
+
+    sampler = sampler or DEFAULT_SAMPLER
+    now = time.time() if now is None else now
 
     rows = []
     if index is not None:
@@ -357,7 +368,7 @@ def live_model_activity(
         :max_candidates
     ]
     if not rows:
-        return {"active": False, "agents": [], "response_model_available": False}
+        return {"active": False, "agents": [], "conversations": [], "response_model_available": False}
 
     projected = []
     for row in rows:
@@ -367,50 +378,68 @@ def live_model_activity(
             path, row.get("last_model"), int(row.get("mtime_ns") or 0), size
         )
         if item is not None:
+            item["_path"] = path
             projected.append(item)
 
-    active_mains = [
-        item
-        for item in projected
-        if item["role"] == "main" and item["status"] == "running"
-    ]
-    active_children = [
-        item
-        for item in projected
-        if item["role"] == "subagent" and item["status"] == "running"
-    ]
-    main = max(active_mains, key=lambda item: item["mtime_ns"], default=None)
-    if main is None and active_children:
-        child = max(active_children, key=lambda item: item["mtime_ns"])
-        parent = child.get("parent_thread_id")
-        main = max(
-            (
-                item
-                for item in projected
-                if item["role"] == "main" and item.get("session_id") == parent
+    mains = [item for item in projected if item["role"] == "main"]
+    children = [item for item in projected if item["role"] == "subagent"]
+    conversations = []
+    for main in mains:
+        root_turn = main.get("root_turn_id") or main.get("turn_id")
+        session_id = main.get("session_id")
+        related = []
+        known_ids = {session_id} if session_id else set()
+        remaining = children[:]
+        for _ in range(len(children)):
+            attached = False
+            for item in remaining[:]:
+                parent = item.get("parent_thread_id")
+                belongs = (parent in known_ids) if parent else bool(
+                    root_turn and item.get("root_turn_id") == root_turn
+                )
+                if not belongs:
+                    continue
+                related.append(item)
+                remaining.remove(item)
+                if item.get("session_id"):
+                    known_ids.add(item["session_id"])
+                attached = True
+            if not attached:
+                break
+        active = main["status"] == "running" or any(
+            item["status"] == "running" for item in related
+        )
+        if not active:
+            continue
+        related.sort(key=lambda item: (item["status"] != "running", -item["mtime_ns"]))
+        members = [main] + related[:8]
+        agents = []
+        for item in members:
+            visible = {key: value for key, value in item.items() if key != "_path"}
+            visible["telemetry"] = sampler.sample(
+                item["_path"], now=now, active=item["status"] == "running"
+            )
+            agents.append(visible)
+        conversation_id = str(session_id or "local-" + hashlib.sha256(
+            str(main["_path"]).encode("utf-8")
+        ).hexdigest()[:12])
+        conversations.append({
+            "conversation_id": conversation_id,
+            "active": active,
+            "agents": agents,
+            "telemetry": sampler.summarize(
+                [item["_path"] for item in members], now=now, active=active
             ),
-            key=lambda item: item["mtime_ns"],
-            default=None,
-        )
-    if main is None:
-        return {"active": False, "agents": [], "response_model_available": False}
-
-    root_turn = main.get("root_turn_id") or main.get("turn_id")
-    session_id = main.get("session_id")
-    children = [
-        item
-        for item in projected
-        if item["role"] == "subagent"
-        and (
-            item.get("root_turn_id") == root_turn
-            or item.get("parent_thread_id") == session_id
-        )
-    ]
-    children.sort(key=lambda item: (item["status"] != "running", -item["mtime_ns"]))
-    agents = [main] + children[:8]
+            "last_activity_ns": max(item["mtime_ns"] for item in members),
+            "response_model_available": any(item.get("response_model") for item in members),
+        })
+    conversations.sort(key=lambda item: item["last_activity_ns"], reverse=True)
+    selected = conversations[0] if conversations else None
     return {
-        "active": True,
-        "agents": agents,
-        "response_model_available": any(item.get("response_model") for item in agents),
-        "evidence_note": "响应模型仅在会话明确记录 response.model 时显示",
+        "active": bool(selected),
+        "agents": selected["agents"] if selected else [],
+        "conversations": conversations,
+        "selected_conversation_id": selected["conversation_id"] if selected else None,
+        "response_model_available": selected["response_model_available"] if selected else False,
+        "evidence_note": "响应模型仅在会话明确记录 response.model 时显示；速率来自调用完成后的用量记录",
     }
