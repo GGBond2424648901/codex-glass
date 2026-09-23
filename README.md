@@ -8,7 +8,7 @@ Windows 原生悬浮组件与完整看板。展示模型 Token、美元费用估
 
 [下载 Windows EXE](https://github.com/GGBond2424648901/codex-glass/releases/latest) · [使用指南](DESKTOP_GUIDE_zh-CN.md) · [源码架构](docs/ARCHITECTURE.md) · [数据与隐私](PRIVACY.md) · [反馈问题](https://github.com/GGBond2424648901/codex-glass/issues)
 
-> **4.3.3 更新**：修复多对话漏检；新开的活动对话无需重启即可出现在列表。每 3 秒发现活动会话，但只读取当前选中对话的 Token 用量；切换时立即刷新并释放旧对话采样缓存。“近 60 秒”只是速率统计窗口。[更新记录](CHANGELOG.md) · [验收记录](docs/VERIFICATION.md)
+> **4.3.3 更新**：修复多对话漏检；新开的活动对话无需重启即可出现在列表。每 3 秒检查新会话，但只对当前选中的对话采样 Token 用量；切换时立即刷新并释放旧采样缓存。完整看板读取额度不会干扰速率。“近 60 秒”只是速率统计窗口。[更新记录](CHANGELOG.md) · [验收记录](docs/VERIFICATION.md)
 
 ![原生完整看板](docs/images/overview-today.png)
 

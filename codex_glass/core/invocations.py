@@ -7,7 +7,8 @@ import json
 import os
 import threading
 import time
-from heapq import nlargest
+from datetime import datetime, timedelta
+from heapq import heappush, heapreplace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -19,7 +20,7 @@ _MAX_RECORD_BYTES = 1024 * 1024
 _MAX_REVERSE_SCAN = 64 * 1024 * 1024
 _REVERSE_CHUNK = 1024 * 1024
 _PROJECTION_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
-_DISCOVERY_CACHE: dict[str, tuple[float, list[Path]]] = {}
+_DISCOVERY_CACHE: dict[str, tuple[float, float, list[Path]]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -293,34 +294,107 @@ def _cached_projection(
             size,
             dict(value) if value is not None else None,
         )
-        if len(_PROJECTION_CACHE) > 64:
-            for stale in list(_PROJECTION_CACHE)[:-64]:
+        if len(_PROJECTION_CACHE) > 128:
+            for stale in list(_PROJECTION_CACHE)[:-128]:
                 _PROJECTION_CACHE.pop(stale, None)
     return value
 
 
+def _offer_candidate(heap: list, item: tuple, limit: int) -> None:
+    if limit <= 0:
+        return
+    if len(heap) < limit:
+        heappush(heap, item)
+    elif item > heap[0]:
+        heapreplace(heap, item)
+
+
+def _session_role(path: Path) -> tuple[str | None, str | None]:
+    first = _first_record(path)
+    if not first or first.get("type") != "session_meta":
+        return None, None
+    payload = first.get("payload")
+    if not isinstance(payload, dict):
+        return None, None
+    source = payload.get("source")
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+    return ("subagent" if isinstance(spawn, dict) else "main", payload.get("session_id") or payload.get("id"))
+
+
+def _rank_session_paths(
+    paths: Iterable[tuple[Path, int, str | None]], limit: int, selected_conversation_id: str | None,
+    *, recent_only: bool,
+) -> list[tuple[Path, int, str | None]]:
+    """Keep bounded main and child candidates independently, so children cannot evict roots."""
+
+    main_heap: list[tuple[int, str, Path, str | None]] = []
+    child_heap: list[tuple[int, str, Path, str | None]] = []
+    selected_root = None
+    cutoff = int((time.time() - 86400) * 1_000_000_000) if recent_only else 0
+    for path, mtime_ns, fallback_model in paths:
+        if mtime_ns < cutoff:
+            continue
+        role, session_id = _session_role(path)
+        item = (mtime_ns, str(path), path, fallback_model)
+        if role == "main":
+            _offer_candidate(main_heap, item, limit)
+            if session_id and session_id == selected_conversation_id:
+                selected_root = item
+        elif role == "subagent":
+            _offer_candidate(child_heap, item, max(8, limit * 4))
+    ranked = sorted(main_heap + child_heap + ([selected_root] if selected_root else []), reverse=True)
+    return list(dict.fromkeys((item[2], item[0], item[3]) for item in ranked))
+
+
+def _stat_session_paths(paths: Iterable[Path]) -> Iterable[tuple[Path, int, None]]:
+    for path in paths:
+        try:
+            yield path, path.stat().st_mtime_ns, None
+        except OSError:
+            continue
+
+
+def _fast_session_paths(root: Path, known: list[Path]) -> Iterable[Path]:
+    """Check today's Codex folders and already-seen folders without walking old years."""
+
+    today = datetime.now().date()
+    folders = {root}
+    for offset in (-1, 0, 1):
+        day = today + timedelta(days=offset)
+        folders.add(root / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}")
+    folders.update(path.parent for path in known)
+    for folder in folders:
+        try:
+            yield from folder.glob("*.jsonl")
+        except OSError:
+            continue
+
+
 def _recent_session_files(
-    sessions_dir: Path, limit: int
+    sessions_dir: Path, limit: int, selected_conversation_id: str | None = None
 ) -> list[tuple[Path, os.stat_result]]:
-    root = str(Path(sessions_dir).resolve())
+    root = Path(sessions_dir).resolve()
+    key = os.path.normcase(str(root))
     now = time.monotonic()
     with _CACHE_LOCK:
-        cached = _DISCOVERY_CACHE.get(os.path.normcase(root))
-        paths = list(cached[1]) if cached and cached[0] > now else []
-    if not paths:
-        ranked = []
+        cached = _DISCOVERY_CACHE.get(key)
+    if cached and cached[0] > now:
+        paths = cached[2]
+    else:
+        full_scan = cached is None or now - cached[1] >= 60
         try:
-            for path in Path(root).rglob("*.jsonl"):
-                try:
-                    stat = path.stat()
-                except OSError:
-                    continue
-                ranked.append((stat.st_mtime_ns, str(path), path))
+            source = root.rglob("*.jsonl") if full_scan else _fast_session_paths(root, cached[2])
+            paths = [path for path, _mtime, _model in _rank_session_paths(
+                _stat_session_paths(source), limit, selected_conversation_id, recent_only=True
+            )]
         except OSError:
-            ranked = []
-        paths = [item[2] for item in nlargest(limit, ranked)]
+            paths = []
         with _CACHE_LOCK:
-            _DISCOVERY_CACHE[os.path.normcase(root)] = (now + 2.5, paths)
+            _DISCOVERY_CACHE[key] = (now + 2.5, now if full_scan else cached[1], paths)
+            if len(_DISCOVERY_CACHE) > 16:
+                for stale in list(_DISCOVERY_CACHE)[:-16]:
+                    _DISCOVERY_CACHE.pop(stale, None)
     result = []
     for path in paths:
         try:
@@ -346,34 +420,34 @@ def live_model_activity(
     sampler.expire_idle(now=now)
 
     rows = []
-    if index is not None:
+    if sessions_dir is None and index is not None:
         try:
             with index.read_transaction() as reader:
-                rows = list(
-                    reader.execute(
-                        """SELECT path,last_model,mtime_ns,size FROM session_files
-                           WHERE missing=0 AND error IS NULL ORDER BY mtime_ns DESC LIMIT ?""",
-                        (max_candidates * 2,),
-                    ).fetchall()
+                indexed = reader.execute(
+                    """SELECT path,last_model,mtime_ns FROM session_files
+                       WHERE missing=0 AND error IS NULL AND mtime_ns>=?""",
+                    (int((time.time() - 86400) * 1_000_000_000),),
+                )
+                # SQLite cursors stream rows; do not materialize the whole archive.
+                rows = _rank_session_paths(
+                    ((Path(row["path"]), int(row["mtime_ns"] or 0), row["last_model"]) for row in indexed),
+                    max_candidates, selected_conversation_id, recent_only=False,
                 )
         except Exception:
             rows = []
 
     candidates: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        path = str(row["path"])
+    for row, mtime_ns, fallback_model in rows:
         try:
-            size = int(row["size"] or 0)
-        except (KeyError, IndexError, TypeError):
-            size = 0
-        candidates[os.path.normcase(path)] = {
-            "path": path,
-            "last_model": row["last_model"],
-            "mtime_ns": int(row["mtime_ns"] or 0),
-            "size": size,
+            stat = row.stat()
+        except OSError:
+            continue
+        candidates[os.path.normcase(str(row))] = {
+            "path": str(row), "last_model": fallback_model,
+            "mtime_ns": mtime_ns, "size": stat.st_size,
         }
     if sessions_dir is not None:
-        for path, stat in _recent_session_files(Path(sessions_dir), max_candidates * 2):
+        for path, stat in _recent_session_files(Path(sessions_dir), max_candidates, selected_conversation_id):
             key = os.path.normcase(str(path.resolve()))
             current = candidates.get(key)
             if current is None or stat.st_mtime_ns > current["mtime_ns"]:
@@ -383,9 +457,7 @@ def live_model_activity(
                     "mtime_ns": stat.st_mtime_ns,
                     "size": stat.st_size,
                 }
-    rows = sorted(candidates.values(), key=lambda row: row["mtime_ns"], reverse=True)[
-        : max_candidates * 2
-    ]
+    rows = sorted(candidates.values(), key=lambda row: row["mtime_ns"], reverse=True)
     if not rows:
         sampler.retain_paths([])
         return {"active": False, "agents": [], "conversations": [], "response_model_available": False}

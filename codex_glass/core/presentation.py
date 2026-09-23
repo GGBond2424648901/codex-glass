@@ -93,14 +93,10 @@ def quota_windows(data):
     ]
 
 
-def desktop_snapshot(coordinator, *, selected_conversation_id=None):
-    data = coordinator.snapshot()
-    result = {
-        key: data[key]
-        for key in ("total", "by_model", "windows", "charts", "pricing", "source", "generated_at", "index")
-        if key in data
-    }
-    result["rate_limits"] = {"limits": []}
+def local_rate_limits(coordinator):
+    """Read only the current machine's quota; never touch live conversation sampling."""
+
+    result = {"limits": []}
     index = getattr(coordinator, "index", None)
     if index is not None:
         try:
@@ -111,7 +107,7 @@ def desktop_snapshot(coordinator, *, selected_conversation_id=None):
                     ORDER BY q.observed_at DESC,q.source_offset DESC LIMIT 1"""
                 ).fetchone()
                 if row:
-                    result["rate_limits"] = json.loads(row["payload_json"])
+                    result = json.loads(row["payload_json"])
                 else:
                     row = reader.execute(
                         """SELECT r.observed_at,r.used_percent,r.window_minutes,r.resets_at
@@ -123,11 +119,23 @@ def desktop_snapshot(coordinator, *, selected_conversation_id=None):
                         primary = {
                             key: row[key] for key in ("observed_at", "used_percent", "window_minutes", "resets_at")
                         }
-                        result["rate_limits"]["limits"] = [dict(primary, scope="global", limit_id="codex")]
+                        result["limits"] = [dict(primary, scope="global", limit_id="codex")]
         except (sqlite3.Error, RuntimeError):
             pass
     else:
-        result["rate_limits"] = data.get("rate_limits")
+        result = coordinator.snapshot().get("rate_limits") or {"limits": []}
+    return result
+
+
+def desktop_snapshot(coordinator, *, selected_conversation_id=None):
+    data = coordinator.snapshot()
+    index = getattr(coordinator, "index", None)
+    result = {
+        key: data[key]
+        for key in ("total", "by_model", "windows", "charts", "pricing", "source", "generated_at", "index")
+        if key in data
+    }
+    result["rate_limits"] = local_rate_limits(coordinator)
     try:
         from codex_glass.core.invocations import live_model_activity
 

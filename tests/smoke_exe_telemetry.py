@@ -96,7 +96,9 @@ def main(exe):
             assert result["telemetry"]["cache_hit_percent"] == 35.0, result["telemetry"]
             assert data["total"]["total_tokens"] == 380, data["total"]
             stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            write_records(sessions / "new-conversation.jsonl", [
+            today = datetime.now().astimezone()
+            new_session = sessions / f"{today:%Y}" / f"{today:%m}" / f"{today:%d}" / "new-conversation.jsonl"
+            write_records(new_session, [
                 {"type": "session_meta", "payload": {"session_id": "smoke-new"}},
                 {"timestamp": stamp, "type": "turn_context", "payload": {
                     "turn_id": "smoke-new-turn", "model": "gpt-6-sol"
@@ -123,6 +125,9 @@ def main(exe):
             assert switched["selected_conversation_id"] == "smoke-new", switched
             assert by_id["smoke-new"]["telemetry"]["output_tps"] == 2.0, by_id["smoke-new"]
             assert by_id["smoke-main"]["telemetry"] is None, by_id["smoke-main"]
+            with opener.open(url + "/api/quota", timeout=2) as response:
+                quota = json.load(response)
+            assert "rate_limits" in quota and "model_activity" not in quota, quota
             capture = root / "exe-capture.png"
             desktop = subprocess.run(
                 [str(exe), "--url", url, "--no-start-backend", "--capture", str(capture)],

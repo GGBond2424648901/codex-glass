@@ -192,6 +192,21 @@ class WebIndexingTests(unittest.TestCase):
         self.assertIn("today", data["windows"])
         self.assertEqual([], data["rate_limits"]["limits"])
 
+    def test_quota_endpoint_does_not_sample_or_evict_selected_conversation(self):
+        from codex_glass.core.live_telemetry import DEFAULT_SAMPLER
+
+        self.serve()
+        self.wait_status("ready")
+        selected = self.sessions / "selected.jsonl"
+        selected.write_bytes(b"")
+        DEFAULT_SAMPLER.sample(selected, now=time.time())
+        self.assertIn(str(selected), DEFAULT_SAMPLER._states)
+        code, data = self.request("/api/quota")
+        self.assertEqual(200, code)
+        self.assertEqual([], data["rate_limits"]["limits"])
+        self.assertNotIn("model_activity", data)
+        self.assertIn(str(selected), DEFAULT_SAMPLER._states)
+
     def test_widget_endpoint_samples_only_requested_conversation(self):
         stamp = datetime.now(timezone.utc).isoformat()
         for name, output in (("active-a", 60), ("active-b", 120)):

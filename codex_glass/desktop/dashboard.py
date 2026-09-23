@@ -295,7 +295,7 @@ class NativeDashboard(QWidget):
             # fallback for the current local account endpoint.
             data["rate_limits"] = {"limits": []}
             try:
-                data["rate_limits"] = self.get_json("/api/widget").get("rate_limits")
+                data["rate_limits"] = self.get_json("/api/quota").get("rate_limits")
             except Exception:
                 pass
             return data

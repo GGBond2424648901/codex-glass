@@ -64,6 +64,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
 
+        if parsed.path == "/api/quota":
+            from codex_glass.core.presentation import local_rate_limits
+
+            data = {"rate_limits": local_rate_limits(self.server.coordinator)}
+            self._send(200, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
+
         if parsed.path == "/api/data":
             data = self.server.coordinator.snapshot()
             data.setdefault(
