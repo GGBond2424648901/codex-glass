@@ -532,7 +532,7 @@ class GlassWidget(QWidget):
         self.manager = QNetworkAccessManager(self)
         self.manager.finished.connect(self.received)
         self.timer = QTimer(self)
-        self.timer.setInterval(5000)
+        self.timer.setInterval(3000)
         self.timer.timeout.connect(self.fetch)
         self.timer.timeout.connect(self.render_quota)
         self.timer.start()
@@ -950,7 +950,7 @@ class GlassWidget(QWidget):
         fatal = status == "error" or (bool(error) and not warning)
         fresh = self.connected and age < 180 and status in (None, "ready") and not fatal
         self.dot.setStyleSheet("color:" + (MINT if fresh else "#d79c62") + ";")
-        self.dot.setToolTip(("已同步" if fresh else "离线或数据较旧") + f"\n{stamp}\n每5秒检查；索引汇总可能延迟")
+        self.dot.setToolTip(("已同步" if fresh else "离线或数据较旧") + f"\n{stamp}\n每3秒检查；索引汇总可能延迟")
         if not self.connected:
             message = "正在连接本机数据…" if self.backend_attempts < 3 else "后台未连接\n菜单 → 立即检查数据"
         elif fatal:

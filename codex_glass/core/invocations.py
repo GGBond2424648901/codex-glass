@@ -325,6 +325,7 @@ def live_model_activity(
 
     sampler = sampler or DEFAULT_SAMPLER
     now = time.time() if now is None else now
+    sampler.expire_idle(now=now)
 
     rows = []
     if index is not None:

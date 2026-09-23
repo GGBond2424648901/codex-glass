@@ -8,7 +8,7 @@ Windows 原生悬浮组件与完整看板。展示模型 Token、美元费用估
 
 [下载 Windows EXE](https://github.com/GGBond2424648901/codex-glass/releases/latest) · [使用指南](DESKTOP_GUIDE_zh-CN.md) · [源码架构](docs/ARCHITECTURE.md) · [数据与隐私](PRIVACY.md) · [反馈问题](https://github.com/GGBond2424648901/codex-glass/issues)
 
-> **4.3.0 更新**：新增按对话隔离的输出吞吐、缓存占比和动态短时趋势；迷你窗可切换速率页，展开窗可选择对话并查看各子代理。数据由本机会话日志在调用结束后写入，不是逐 Token 流式速度。[更新记录](CHANGELOG.md) · [验收记录](docs/VERIFICATION.md)
+> **4.3.1 更新**：小窗口每 3 秒检查新用量，“近 60 秒”仅是各对话独立的速率统计窗口；有界逐行增量读取降低冷启动临时内存，并回收闲置采样缓存。数据仍由本机会话日志在调用结束后写入，不是逐 Token 流式速度。[更新记录](CHANGELOG.md) · [验收记录](docs/VERIFICATION.md)
 
 ![原生完整看板](docs/images/overview-today.png)
 
@@ -137,7 +137,7 @@ python monitor.py import-index --source-index "D:\history\old-computer.sqlite3"
 
 > 数字仅代表本机样本，不是整个 EXE 的固定占用承诺。Qt 界面、启动器、历史规模、导入来源和系统负载均有额外影响。采样也可能遗漏短暂峰值。测试方法、精确数据和早期 610,931 条样本记录见 [性能说明](docs/PERFORMANCE.md)。
 
-无新事实且价格未变时复用历史，按分钟时钟更新滚动统计；手动刷新立即安排重算。界面每五秒检查，隐藏窗口停止无用动画及页面重建。检查频率不等于全历史重算耗时。
+无新事实且价格未变时复用历史，按分钟时钟更新滚动统计；手动刷新立即安排重算。小窗口每 3 秒检查新用量，完整看板保持每 5 秒检查；隐藏窗口停止无用动画及页面重建。速率计算采用近 60 秒窗口，检查频率不等于全历史重算耗时，也不保证模型调用过程中逐 Token 更新。
 
 ## 开发与构建
 

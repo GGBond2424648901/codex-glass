@@ -27,6 +27,7 @@ class _SessionState:
     offset: int = 0
     mtime_ns: int = 0
     partial: bytes = b""
+    discarding: bool = False
     total: tuple[int, int, int] | None = None
     from_start: bool = True
     samples: deque[tuple[float, int, int, int]] = field(default_factory=deque)
@@ -66,6 +67,17 @@ class LiveTelemetrySampler:
         self._states: dict[str, _SessionState] = {}
         self._lock = threading.Lock()
 
+    def _expire_idle_locked(self, now: float) -> None:
+        for key, state in list(self._states.items()):
+            if now - state.last_access > _RETENTION_SECONDS:
+                self._states.pop(key, None)
+
+    def expire_idle(self, *, now: float | None = None) -> None:
+        """Release inactive session buffers even when no conversation is running."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._expire_idle_locked(now)
+
     def _refresh(self, path: Path, now: float) -> _SessionState:
         key = str(path)
         state = self._states.get(key)
@@ -80,78 +92,58 @@ class LiveTelemetrySampler:
         ):
             state = _SessionState()
             self._states[key] = state
+        elif size == state.offset:
+            state.last_access = now
+            self._prune(state, now)
+            return state
         start = state.offset
         skipped = False
         if size - start > _COLD_TAIL_BYTES:
             start = size - _COLD_TAIL_BYTES
             skipped = True
             state.partial = b""
+            state.discarding = False
             state.total = None
             state.from_start = False
+        pending = state.partial
+        discarding = state.discarding
+        consumed = 0
         try:
             with path.open("rb") as stream:
+                if skipped:
+                    stream.seek(start - 1)
+                    preceding = stream.read(1)
+                else:
+                    preceding = b"\n"
                 stream.seek(start)
-                data = stream.read(size - start)
+                remaining = size - start
+                if preceding != b"\n":
+                    discarding = True
+                while remaining > 0:
+                    limit = _MAX_RECORD_BYTES + 1 if discarding else _MAX_RECORD_BYTES + 1 - len(pending)
+                    raw = stream.readline(min(limit, remaining))
+                    if not raw:
+                        break
+                    consumed += len(raw)
+                    remaining -= len(raw)
+                    if discarding:
+                        if raw.endswith(b"\n"):
+                            discarding = False
+                        continue
+                    pending += raw
+                    if pending.endswith(b"\n"):
+                        if len(pending) - 1 <= _MAX_RECORD_BYTES:
+                            self._accept_usage(pending[:-1], state, now)
+                        pending = b""
+                    elif len(pending) > _MAX_RECORD_BYTES:
+                        pending = b""
+                        discarding = True
         except OSError:
             return state
-        state.offset = start + len(data)
+        state.offset = start + consumed
         state.mtime_ns = stat.st_mtime_ns
-        if skipped:
-            newline = data.find(b"\n")
-            data = data[newline + 1:] if newline >= 0 else b""
-        elif state.partial:
-            data = state.partial + data
-        lines = data.split(b"\n")
-        state.partial = lines.pop() if lines else b""
-        if len(state.partial) > _MAX_RECORD_BYTES:
-            state.partial = b""
-        for raw in lines:
-            if (
-                len(raw) > _MAX_RECORD_BYTES
-                or b'token_count' not in raw
-                or _USAGE_RECORD_HEAD.search(raw[:192]) is None
-            ):
-                continue
-            try:
-                record = json.loads(raw)
-            except (UnicodeDecodeError, json.JSONDecodeError, MemoryError):
-                continue
-            if not isinstance(record, dict):
-                continue
-            payload = record.get("payload")
-            if record.get("type") == "event_msg":
-                if not isinstance(payload, dict) or payload.get("type") != "token_count":
-                    continue
-                info = payload.get("info")
-            elif record.get("type") == "token_count":
-                info = payload.get("info") if isinstance(payload, dict) else record.get("info")
-            else:
-                continue
-            if not isinstance(info, dict):
-                continue
-            total = _counts(info.get("total_token_usage"))
-            last = _counts(info.get("last_token_usage"))
-            if total is None and last is None:
-                continue
-            if total is not None and state.total == total:
-                continue
-            if total is not None and state.total is not None:
-                delta = tuple(max(0, current - previous) for current, previous in zip(total, state.total))
-            elif last is not None:
-                delta = last
-            elif state.from_start:
-                delta = total
-            else:
-                # The cold tail began midway through cumulative history.
-                state.total = total
-                continue
-            if total is not None:
-                state.total = total
-            timestamp = _timestamp(record.get("timestamp"))
-            if timestamp is None or timestamp > now + 5 or timestamp < now - _RETENTION_SECONDS:
-                continue
-            if delta is not None and any(delta):
-                state.samples.append((timestamp, *delta))
+        state.partial = pending
+        state.discarding = discarding
         state.last_access = now
         self._prune(state, now)
         if len(self._states) > 64:
@@ -159,6 +151,55 @@ class LiveTelemetrySampler:
             for stale in oldest[:-64]:
                 self._states.pop(stale, None)
         return state
+
+    @staticmethod
+    def _accept_usage(raw: bytes, state: _SessionState, now: float) -> None:
+        if (
+            len(raw) > _MAX_RECORD_BYTES
+            or b'token_count' not in raw
+            or _USAGE_RECORD_HEAD.search(raw[:192]) is None
+        ):
+            return
+        try:
+            record = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError, MemoryError):
+            return
+        if not isinstance(record, dict):
+            return
+        payload = record.get("payload")
+        if record.get("type") == "event_msg":
+            if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                return
+            info = payload.get("info")
+        elif record.get("type") == "token_count":
+            info = payload.get("info") if isinstance(payload, dict) else record.get("info")
+        else:
+            return
+        if not isinstance(info, dict):
+            return
+        total = _counts(info.get("total_token_usage"))
+        last = _counts(info.get("last_token_usage"))
+        if total is None and last is None:
+            return
+        if total is not None and state.total == total:
+            return
+        if total is not None and state.total is not None:
+            delta = tuple(max(0, current - previous) for current, previous in zip(total, state.total))
+        elif last is not None:
+            delta = last
+        elif state.from_start:
+            delta = total
+        else:
+            # The cold tail began midway through cumulative history.
+            state.total = total
+            return
+        if total is not None:
+            state.total = total
+        timestamp = _timestamp(record.get("timestamp"))
+        if timestamp is None or timestamp > now + 5 or timestamp < now - _RETENTION_SECONDS:
+            return
+        if delta is not None and any(delta):
+            state.samples.append((timestamp, *delta))
 
     @staticmethod
     def _prune(state: _SessionState, now: float) -> None:
@@ -174,6 +215,7 @@ class LiveTelemetrySampler:
             samples: list[tuple[float, int, int, int]] = []
             for path in dict.fromkeys(paths):
                 samples.extend(self._refresh(Path(path), now).samples)
+            self._expire_idle_locked(now)
         recent = [item for item in samples if now - 60 <= item[0] <= now + 5]
         cache_window = [item for item in samples if now - 300 <= item[0] <= now + 5]
         output = sum(item[3] for item in recent)

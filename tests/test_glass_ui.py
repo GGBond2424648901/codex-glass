@@ -102,6 +102,13 @@ class GlassUITests(unittest.TestCase):
         self.assertTrue(self.widget.cost.isVisible())
         self.assertEqual("Token / min", self.widget.mini_chart.unit)
 
+    def test_visible_widget_checks_for_new_usage_within_three_seconds(self):
+        self.widget.timer.start()
+        QTest.qWait(1200)
+        remaining = self.widget.timer.remainingTime()
+        self.assertGreater(remaining, 0)
+        self.assertLess(remaining, 2600, f"next usage check is still {remaining} ms away")
+
     def test_old_quota_is_visible_and_clears_after_fresh_or_missing_snapshot(self):
         from datetime import datetime, timedelta
 

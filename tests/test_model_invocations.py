@@ -36,6 +36,18 @@ def _write(path, records):
 
 
 class ModelInvocationTests(unittest.TestCase):
+    def test_inactive_dashboard_checks_release_old_sampler_states(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "old-session.jsonl"
+            path.write_bytes(b"")
+            sampler = LiveTelemetrySampler()
+            sampler.sample(path, now=100)
+            self.assertIn(str(path), sampler._states)
+            result = live_model_activity(None, root, sampler=sampler, now=401)
+            self.assertFalse(result["active"])
+            self.assertNotIn(str(path), sampler._states)
+
     def test_short_names_preserve_unknown_models(self):
         self.assertEqual("Astra", short_model_name("gpt-6-astra"))
         self.assertEqual("custom-model", short_model_name("custom-model"))

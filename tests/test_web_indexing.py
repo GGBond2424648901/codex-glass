@@ -60,7 +60,12 @@ class WebIndexingTests(unittest.TestCase):
 
     def test_idle_scans_reuse_history_until_clock_bucket_or_explicit_refresh(self):
         self.coordinator.interval = 0.025
-        with mock.patch.object(self.index, "build_summary", wraps=self.index.build_summary) as builds:
+        # Keep this test inside one minute; the real coordinator intentionally
+        # rebuilds when its rolling-statistics minute bucket changes.
+        fixed_time = int(time.time() // 60) * 60 + 30
+        with mock.patch("codex_glass.storage.index.time.time", return_value=fixed_time), mock.patch.object(
+            self.index, "build_summary", wraps=self.index.build_summary
+        ) as builds:
             self.coordinator.start()
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline and builds.call_count < 1:

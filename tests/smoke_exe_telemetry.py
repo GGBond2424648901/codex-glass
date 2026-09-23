@@ -85,7 +85,7 @@ def main(exe):
                 time.sleep(0.3)
             else:
                 raise RuntimeError(f"EXE backend did not return usage: {data and data.get('index')}")
-            assert data["server"]["version"] == "4.3.0", data["server"]
+            assert data["server"]["version"] == "4.3.1", data["server"]
             assert len(conversations) == 1, conversations
             result = conversations[0]
             assert result["conversation_id"] == "smoke-main", result
@@ -99,7 +99,7 @@ def main(exe):
                 env=environment, creationflags=flags, timeout=70, check=True,
             )
             assert desktop.returncode == 0 and capture.stat().st_size > 1000
-            print("EXE smoke OK: v4.3.0, 380 tokens, 3 tok/s, 35% cache, 2 agents, Qt capture")
+            print("EXE smoke OK: v4.3.1, 380 tokens, 3 tok/s, 35% cache, 2 agents, Qt capture")
         finally:
             if backend.poll() is None:
                 # The Windows one-file bootloader owns a child process. Stop only

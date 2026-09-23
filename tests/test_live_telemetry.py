@@ -1,5 +1,6 @@
 import json
 import tempfile
+import tracemalloc
 import unittest
 from pathlib import Path
 
@@ -98,6 +99,41 @@ class LiveTelemetryTests(unittest.TestCase):
             path.write_bytes((body + " " * (old_size - len(body) - 1) + "\n").encode("utf-8"))
             self.assertEqual(old_size, path.stat().st_size)
             self.assertEqual(1.5, sampler.sample(path, now=self.BASE + 22)["output_tps"])
+
+    def test_cold_tail_scanning_has_bounded_peak_memory(self):
+        """A multi-megabyte session must not be materialized for one rate sample."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large-session.jsonl"
+            chatter = json.dumps({"type": "response_item", "payload": {"text": "x" * 900}}).encode() + b"\n"
+            with path.open("wb") as stream:
+                for _ in range(7000):
+                    stream.write(chatter)
+                stream.write(
+                    (json.dumps(usage(10, 100, 20, 60, last={
+                        "input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 60
+                    }), separators=(",", ":")) + "\n").encode()
+                )
+            sampler = LiveTelemetrySampler()
+            tracemalloc.start()
+            try:
+                sample = sampler.sample(path, now=self.BASE + 12)
+                _current, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertEqual(1.0, sample["output_tps"])
+            self.assertLess(peak, 3 * 1024 * 1024, f"cold sample allocated {peak:,} bytes")
+
+    def test_inactive_session_buffers_expire_instead_of_lingering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "old.jsonl"
+            later = Path(directory) / "later.jsonl"
+            append(first, usage(10, 100, 20, 60))
+            later.write_bytes(b"")
+            sampler = LiveTelemetrySampler()
+            sampler.sample(first, now=self.BASE + 12)
+            self.assertIn(str(first), sampler._states)
+            sampler.sample(later, now=self.BASE + 400)
+            self.assertNotIn(str(first), sampler._states)
 
 
 if __name__ == "__main__":
