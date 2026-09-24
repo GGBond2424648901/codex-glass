@@ -494,7 +494,7 @@ class GlassWidget(QWidget):
         self.mini_page.setToolTip("切换总览 / 对话速率")
         self.mini_page.clicked.connect(lambda: self.set_mini_telemetry_mode(not self.mini_telemetry_mode))
         self.mini_page.hide()
-        self.mini_rate_caption = label(self, "近3秒输出", 12, MUTED)
+        self.mini_rate_caption = label(self, "每秒输出", 12, MUTED)
         self.mini_rate_caption.setGeometry(30, 63, 155, 20)
         self.mini_rate_value = label(self, "—", 27, INK, True)
         self.mini_rate_value.setGeometry(30, 82, 171, 34)
@@ -678,24 +678,30 @@ class GlassWidget(QWidget):
         main = agents[0] if agents else {}
         children = max(0, len(agents) - 1)
         if selected:
-            index = conversations.index(selected) + 1
-            total = len(conversations)
+            title = str(selected.get("title") or f'对话 {str(selected.get("conversation_id") or "")[:8]}').strip()
             telemetry = selected.get("telemetry") or {}
             value = telemetry.get("output_tps")
             speed = f"{value:g} tok/s" if isinstance(value, (int, float)) else "等待用量"
-            self.conversation_button.setText(f"对话 {index}/{total} · {speed} ▾")
-            self.conversation_button.setToolTip("最近3秒已完成调用的输出 Token / 3 秒；每秒刷新，不是逐 Token 流式测速。")
-            self.mini_activity.setText(
-                f"对话 {index}/{total} ▾" if self.mini_telemetry_mode
-                else f'{main.get("requested_model_short", "未知")} · 子{children}'
+            full_title = self.conversation_button.fontMetrics().elidedText(
+                title, Qt.ElideRight, self.conversation_button.width() - 22
             )
+            mini_title = self.mini_activity.fontMetrics().elidedText(
+                title, Qt.ElideRight, self.mini_activity.width() - 20
+            )
+            self.conversation_button.setText(f"{full_title} ▾")
+            self.conversation_button.setToolTip(
+                f"{title}\n{speed} · 当前对话\n每秒检查已完成调用；上次记录并非流式瞬时速度。"
+            )
+            self.mini_activity.setText(f"{mini_title} ▾")
         else:
             self.conversation_button.setText("")
             self.mini_activity.setText(f'● {main.get("requested_model_short", "未知")} · 子{children}')
         self.conversation_button.setVisible(bool(selected) and not self.compact_mode)
         self.mini_activity.setVisible(active and self.compact_mode)
         self.mini_activity.setToolTip(
-            "切换当前对话；速率不跨对话合并" if self.mini_telemetry_mode else "展开查看当前主代理与子代理模型"
+            (f"{selected.get('title') or title}\n切换当前对话；速率不跨对话合并") if selected and self.mini_telemetry_mode
+            else (f"{selected.get('title') or title}\n展开查看当前主代理与子代理模型") if selected
+            else "展开查看当前主代理与子代理模型"
         )
         self.render_telemetry()
         if not self.compact_mode:
@@ -756,7 +762,8 @@ class GlassWidget(QWidget):
         for index, row in enumerate(conversations, 1):
             agent = (row.get("agents") or [{}])[0]
             model = agent.get("requested_model_short") or "未知"
-            action = self.conversation_menu.addAction(f"对话 {index} · {model}")
+            title = str(row.get("title") or f'对话 {str(row.get("conversation_id") or index)[:8]}')
+            action = self.conversation_menu.addAction(f"{title} · {model}")
             action.setCheckable(True)
             action.setChecked(row.get("conversation_id") == self.selected_conversation_id)
             action.triggered.connect(
@@ -789,21 +796,24 @@ class GlassWidget(QWidget):
         telemetry = (self.current_conversation or {}).get("telemetry") or {}
         value = telemetry.get("output_tps")
         cache = telemetry.get("cache_hit_percent")
+        has_rate = isinstance(value, (int, float))
+        is_last = has_rate and telemetry.get("status") == "last_record"
         self.mini_rate_caption.setText(
-            "近3秒输出" if value is not None
+            "上次记录" if is_last
+            else "每秒输出" if has_rate
             else "生成中 · 等待用量" if self.current_conversation
             else "暂无活动对话"
         )
-        rate_text = f"{value:g} tok/s" if isinstance(value, (int, float)) else "—"
+        rate_text = f"{value:g} tok/s" if has_rate else "—"
         self.mini_rate_value.setText(rate_text)
         size = 27
         while size > 17 and QFontMetrics(font(size, True)).horizontalAdvance(rate_text) > self.mini_rate_value.width():
             size -= 1
         self.mini_rate_value.setFont(font(size, True))
         self.mini_cache_value.setText(f"{cache:g}%" if isinstance(cache, (int, float)) else "—")
-        status = "已完成调用 · 每秒刷新" if value is not None else "生成中 · 等待用量记录"
+        status = "上次有记录的单秒速率 · 每秒检查" if is_last else "最新单秒速率 · 每秒检查" if has_rate else "生成中 · 等待用量记录"
         note = (
-            f"{status}\n速率 = 近3秒已完成调用输出 Token / 3秒；不是逐 Token 流式测速。"
+            f"{status}\n速率 = 最近有用量记录的单秒输出 Token；并非流式瞬时测速。"
             "\n同一对话的主代理与子代理合计；每个对话单独统计。"
             "\n缓存命中 = 近5分钟缓存输入 / 总输入；来自调用完成后的本机记录。"
         )

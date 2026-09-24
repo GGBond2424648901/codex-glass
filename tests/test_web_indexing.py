@@ -234,7 +234,7 @@ class WebIndexingTests(unittest.TestCase):
         activity = data["model_activity"]
         self.assertEqual("active-a", activity["selected_conversation_id"])
         by_id = {row["conversation_id"]: row for row in activity["conversations"]}
-        self.assertEqual(20.0, by_id["active-a"]["telemetry"]["output_tps"])
+        self.assertEqual(60.0, by_id["active-a"]["telemetry"]["output_tps"])
         self.assertIsNone(by_id["active-b"]["telemetry"])
         request_log = io.StringIO()
         with redirect_stderr(request_log), mock.patch.object(
@@ -274,6 +274,31 @@ class WebIndexingTests(unittest.TestCase):
         self.assertEqual(file_id, result["selected_file_id"])
         self.assertEqual(2, len(result["sessions"]))
 
+    def test_rate_history_keeps_selected_idle_session_when_range_shrinks(self):
+        from codex_glass.core.presentation import local_rate_history
+
+        anchor = datetime(2026, 9, 24, 12, 0, 4)
+        with self.index.write_transaction() as connection:
+            selected_id = connection.execute("SELECT file_id FROM session_files LIMIT 1").fetchone()[0]
+            other_id = connection.execute(
+                "INSERT INTO session_files(path,created_at,updated_at) VALUES(?,?,?)",
+                (str(self.sessions / "busy.jsonl"), time.time(), time.time()),
+            ).lastrowid
+            for file_id, offset, stamp, output in (
+                (selected_id, 101001, "2026-09-24T12:00:00", 30),
+                (other_id, 1, "2026-09-24T12:00:04", 90),
+            ):
+                connection.execute(
+                    "INSERT INTO usage_events(file_id,source_offset,occurred_at,output_tokens,total_tokens,created_at) VALUES(?,?,?,?,?,?)",
+                    (file_id, offset, stamp, output, output, time.time()),
+                )
+        wider = local_rate_history(self.coordinator, seconds=5, file_id=selected_id, now=anchor)
+        self.assertEqual([30, 0, 0, 0, 0], wider["values"])
+        shorter = local_rate_history(self.coordinator, seconds=1, file_id=selected_id, now=anchor)
+        self.assertEqual(selected_id, shorter["selected_file_id"])
+        self.assertEqual([0], shorter["values"])
+        self.assertIn(selected_id, [row["file_id"] for row in shorter["sessions"]])
+
     def test_rate_history_endpoint_passes_selected_session_file(self):
         self.serve()
 
@@ -284,6 +309,15 @@ class WebIndexingTests(unittest.TestCase):
             code, payload = self.request("/api/rate-history?seconds=9&file_id=7")
         self.assertEqual(200, code)
         self.assertEqual(7, payload["file_id"])
+
+    def test_widget_poll_does_not_write_conversation_id_to_access_log(self):
+        self.serve()
+        private_id = "private-conversation-123456"
+        request_log = io.StringIO()
+        with redirect_stderr(request_log):
+            code, _payload = self.request(f"/api/widget?conversation_id={private_id}")
+        self.assertEqual(200, code)
+        self.assertNotIn(private_id, request_log.getvalue())
 
     def test_refresh_returns_202_and_schedules_next_scan_without_waiting(self):
         entered, release, second = threading.Event(), threading.Event(), threading.Event()

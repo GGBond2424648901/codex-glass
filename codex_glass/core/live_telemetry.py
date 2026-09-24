@@ -19,7 +19,7 @@ from pathlib import Path
 _COLD_TAIL_BYTES = 4 * 1024 * 1024
 _MAX_RECORD_BYTES = 1024 * 1024
 _RETENTION_SECONDS = 300
-_RATE_WINDOW_SECONDS = 3
+_RATE_WINDOW_SECONDS = 1
 _USAGE_RECORD_HEAD = re.compile(rb'"type"\s*:\s*"(?:event_msg|token_count)"')
 
 
@@ -32,6 +32,9 @@ class _SessionState:
     total: tuple[int, int, int] | None = None
     from_start: bool = True
     samples: deque[tuple[float, int, int, int]] = field(default_factory=deque)
+    last_rate_bucket: int | None = None
+    last_rate_output: int = 0
+    last_usage_at: float | None = None
     last_access: float = 0.0
 
 
@@ -155,9 +158,9 @@ class LiveTelemetrySampler:
         state.discarding = discarding
         state.last_access = now
         self._prune(state, now)
-        if len(self._states) > 64:
+        if len(self._states) > 256:
             oldest = sorted(self._states, key=lambda item: self._states[item].last_access)
-            for stale in oldest[:-64]:
+            for stale in oldest[:-256]:
                 self._states.pop(stale, None)
         return state
 
@@ -209,6 +212,13 @@ class LiveTelemetrySampler:
             return
         if delta is not None and any(delta):
             state.samples.append((timestamp, *delta))
+            bucket = int(timestamp)
+            if state.last_rate_bucket is None or bucket > state.last_rate_bucket:
+                state.last_rate_bucket = bucket
+                state.last_rate_output = delta[2]
+            elif bucket == state.last_rate_bucket:
+                state.last_rate_output += delta[2]
+            state.last_usage_at = max(state.last_usage_at or timestamp, timestamp)
 
     @staticmethod
     def _prune(state: _SessionState, now: float) -> None:
@@ -221,15 +231,24 @@ class LiveTelemetrySampler:
         """Aggregate only the explicitly related sessions passed by the caller."""
         now = time.time() if now is None else now
         output = 0
+        latest_bucket = None
         rate_output = 0
-        rate_seen = False
         inputs = 0
         cached = 0
         last_at = None
         bins = [0] * 12
         with self._lock:
             for path in dict.fromkeys(paths):
-                for timestamp, input_count, cache_count, count in self._refresh(Path(path), now).samples:
+                state = self._refresh(Path(path), now)
+                if state.last_rate_bucket is not None:
+                    if latest_bucket is None or state.last_rate_bucket > latest_bucket:
+                        latest_bucket = state.last_rate_bucket
+                        rate_output = state.last_rate_output
+                    elif state.last_rate_bucket == latest_bucket:
+                        rate_output += state.last_rate_output
+                if state.last_usage_at is not None:
+                    last_at = max(last_at or state.last_usage_at, state.last_usage_at)
+                for timestamp, input_count, cache_count, count in state.samples:
                     last_at = timestamp if last_at is None else max(last_at, timestamp)
                     if now - 300 <= timestamp <= now + 5:
                         inputs += input_count
@@ -238,14 +257,14 @@ class LiveTelemetrySampler:
                         output += count
                         position = min(11, max(0, int((timestamp - (now - 60)) // 5)))
                         bins[position] += count
-                    if now - _RATE_WINDOW_SECONDS < timestamp <= now:
-                        rate_output += count
-                        rate_seen = True
             self._expire_idle_locked(now)
+        has_rate = active and latest_bucket is not None
+        fresh = bool(has_rate and now < latest_bucket + 2)
         return {
-            "status": "recent" if active and rate_seen else "awaiting_usage" if active else "inactive",
-            "output_tps": round(rate_output / _RATE_WINDOW_SECONDS, 2) if active and rate_seen else None,
-            "output_tokens_3s": rate_output if active and rate_seen else 0,
+            "status": "recent" if fresh else "last_record" if has_rate else "awaiting_usage" if active else "inactive",
+            "output_tps": float(rate_output) if has_rate else None,
+            "output_tokens_1s": rate_output if has_rate else 0,
+            "rate_fresh": fresh,
             "rate_window_seconds": _RATE_WINDOW_SECONDS,
             "output_tokens_60s": output if active else 0,
             "cache_hit_percent": round(100 * cached / inputs, 1) if inputs else None,

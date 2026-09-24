@@ -75,8 +75,10 @@ first = invocation_activity()
 second = invocation_activity()
 for index, item in enumerate((first, second), 1):
     item["conversation_id"] = f"visual-conversation-{index}"
+    item["title"] = "额度显示检查" if index == 1 else "会话速率与缓存"
     item["telemetry"] = {
-        "status": "recent", "output_tps": 3.2 if index == 1 else 8.4,
+        "status": "recent" if index == 1 else "last_record",
+        "output_tps": 3.2 if index == 1 else 8.4,
         "cache_hit_percent": 68.0 if index == 1 else 82.0,
         "trend_5s_output": [0, 1, 3, 2, 7, 11, 5, 9, 13, 7, 5, 12],
     }

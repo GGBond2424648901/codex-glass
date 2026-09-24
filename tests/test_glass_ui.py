@@ -79,7 +79,7 @@ class GlassUITests(unittest.TestCase):
         historical_cost = self.widget.cost.text()
         conversation["telemetry"] = {"output_tps": 12.0, "status": "recent"}
         self.widget.apply_live_activity({"active": True, "conversations": [conversation]})
-        self.assertIn("12", self.widget.conversation_button.text())
+        self.assertIn("12 tok/s", self.widget.conversation_button.toolTip())
         self.assertEqual(historical_cost, self.widget.cost.text())
         self.assertEqual(data["total"], self.widget.data["total"])
 
@@ -89,6 +89,8 @@ class GlassUITests(unittest.TestCase):
         second = invocation_activity()
         first["conversation_id"] = "conversation-one"
         second["conversation_id"] = "conversation-two"
+        first["title"] = "额度显示检查"
+        second["title"] = "会话速率与缓存"
         first["telemetry"] = {
             "status": "recent", "output_tps": 1.5, "cache_hit_percent": 40.0,
             "trend_5s_output": [0, 0, 60, 30] + [0] * 8,
@@ -103,17 +105,24 @@ class GlassUITests(unittest.TestCase):
         }
         self.widget.apply_data(data)
         self.assertTrue(self.widget.conversation_button.isVisible())
-        self.assertIn("1/2", self.widget.conversation_button.text())
+        self.assertIn("额度显示", self.widget.conversation_button.text())
         self.widget.select_conversation("conversation-two")
-        self.assertIn("2/2", self.widget.conversation_button.text())
+        self.assertIn("会话速率", self.widget.conversation_button.text())
+        self.assertIn("会话速率与缓存", self.widget.conversation_button.toolTip())
+        self.widget.show_conversation_menu()
+        self.assertIn("额度显示检查", self.widget.conversation_menu.actions()[0].text())
+        self.assertIn("会话速率与缓存", self.widget.conversation_menu.actions()[1].text())
+        self.widget.conversation_menu.hide()
         self.widget.toggle_compact()
         self.widget.set_mini_telemetry_mode(True)
         self.assertFalse(self.widget.cost.isVisible())
         self.assertFalse(self.widget.tokens.isVisible())
         self.assertTrue(self.widget.mini_rate_value.isVisible())
+        self.assertIn("会话", self.widget.mini_activity.text())
+        self.assertIn("会话速率与缓存", self.widget.mini_activity.toolTip())
         self.assertIn("5", self.widget.mini_rate_value.text())
-        self.assertEqual("近3秒输出", self.widget.mini_rate_caption.text())
-        self.assertIn("已完成调用", self.widget.mini_rate_value.toolTip())
+        self.assertEqual("每秒输出", self.widget.mini_rate_caption.text())
+        self.assertIn("单秒输出", self.widget.mini_rate_value.toolTip())
         self.assertEqual("60%", self.widget.mini_cache_value.text())
         self.assertTrue(self.widget.mini_quota.isVisible())
         self.assertEqual("5秒输出 Token", self.widget.mini_chart.unit)
@@ -122,6 +131,21 @@ class GlassUITests(unittest.TestCase):
         self.widget.set_mini_telemetry_mode(False)
         self.assertTrue(self.widget.cost.isVisible())
         self.assertEqual("Token / min", self.widget.mini_chart.unit)
+
+    def test_mini_rate_keeps_number_and_marks_last_record_between_usage_events(self):
+        data = telemetry()
+        conversation = invocation_activity()
+        conversation["conversation_id"] = "one"
+        conversation["telemetry"] = {"output_tps": 94.0, "status": "recent", "rate_fresh": True}
+        data["model_activity"] = {"active": True, "conversations": [conversation]}
+        self.widget.apply_data(data)
+        self.widget.toggle_compact()
+        self.widget.set_mini_telemetry_mode(True)
+        conversation["telemetry"] = {"output_tps": 94.0, "status": "last_record", "rate_fresh": False}
+        self.widget.apply_live_activity({"active": True, "conversations": [conversation]})
+        self.assertEqual("94 tok/s", self.widget.mini_rate_value.text())
+        self.assertEqual("上次记录", self.widget.mini_rate_caption.text())
+        self.assertIn("并非流式", self.widget.mini_rate_value.toolTip())
 
     def test_switch_requests_selected_conversation_immediately(self):
         data = telemetry()

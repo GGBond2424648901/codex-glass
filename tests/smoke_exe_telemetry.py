@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -31,6 +32,17 @@ def main(exe):
     with tempfile.TemporaryDirectory(prefix="codex-glass-exe-telemetry-") as directory:
         root = Path(directory)
         sessions = root / "home" / "sessions"
+        (root / "home").mkdir()
+        titles = sqlite3.connect(root / "home" / "state_5.sqlite")
+        try:
+            titles.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, name TEXT)")
+            titles.executemany("INSERT INTO threads VALUES (?,?,?)", [
+                ("smoke-main", "费用统计检查", None),
+                ("smoke-new", "新对话速率测试", None),
+            ])
+            titles.commit()
+        finally:
+            titles.close()
         initial_stamp = (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         def usage(input_tokens, cached, output, *, at=None):
@@ -97,6 +109,7 @@ def main(exe):
             assert len(conversations) == 1, conversations
             result = conversations[0]
             assert result["conversation_id"] == "smoke-main", result
+            assert result["title"] == "费用统计检查", result
             assert len(result["agents"]) == 2, result
             assert result["telemetry"]["cache_hit_percent"] == 35.0, result["telemetry"]
             assert data["total"]["total_tokens"] == 380, data["total"]
@@ -104,7 +117,13 @@ def main(exe):
             append_records(sessions / "child.jsonl", [usage(200, 100, 180)])
             with opener.open(url + "/api/live-activity?conversation_id=smoke-main", timeout=2) as response:
                 live = json.load(response)
-            assert live["conversations"][0]["telemetry"]["output_tps"] == 30.0, live
+            assert live["conversations"][0]["telemetry"]["output_tps"] == 90.0, live
+            time.sleep(2.2)
+            with opener.open(url + "/api/live-activity?conversation_id=smoke-main", timeout=2) as response:
+                retained = json.load(response)
+            retained_rate = retained["conversations"][0]["telemetry"]
+            assert retained_rate["output_tps"] == 90.0, retained_rate
+            assert retained_rate["status"] == "last_record", retained_rate
             today = datetime.now().astimezone()
             new_session = sessions / f"{today:%Y}" / f"{today:%m}" / f"{today:%d}" / "new-conversation.jsonl"
             write_records(new_session, [
@@ -133,7 +152,8 @@ def main(exe):
                 switched = json.load(response)
             by_id = {row["conversation_id"]: row for row in switched["conversations"]}
             assert switched["selected_conversation_id"] == "smoke-new", switched
-            assert by_id["smoke-new"]["telemetry"]["output_tps"] == 40.0, by_id["smoke-new"]
+            assert by_id["smoke-new"]["title"] == "新对话速率测试", by_id["smoke-new"]
+            assert by_id["smoke-new"]["telemetry"]["output_tps"] == 120.0, by_id["smoke-new"]
             assert by_id["smoke-main"]["telemetry"] is None, by_id["smoke-main"]
             with opener.open(url + "/api/quota", timeout=2) as response:
                 quota = json.load(response)
@@ -144,7 +164,7 @@ def main(exe):
                 env=environment, creationflags=flags, timeout=70, check=True,
             )
             assert desktop.returncode == 0 and capture.stat().st_size > 1000
-            print("EXE smoke OK: v4.3.4, 1s live endpoint, new conversation switched, selected-only telemetry, Qt capture")
+            print("EXE smoke OK: v4.3.4, retained one-second rate, new conversation switched, selected-only telemetry, Qt capture")
         finally:
             if backend.poll() is None:
                 # The Windows one-file bootloader owns a child process. Stop only

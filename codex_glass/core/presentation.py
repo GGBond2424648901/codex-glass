@@ -154,7 +154,17 @@ def local_rate_history(coordinator, *, seconds=300, file_id=None, now=None):
                 )
                 sessions = [dict(row) for row in rows]
                 ids = {int(row["file_id"]) for row in sessions}
-                selected_file_id = int(file_id) if file_id is not None and int(file_id) in ids else (
+                requested_id = int(file_id) if file_id is not None else None
+                if requested_id is not None and requested_id not in ids:
+                    selected_row = reader.execute(
+                        """SELECT file_id,COALESCE(last_model,'未记录模型') AS model,
+                        NULL AS last_at FROM session_files WHERE file_id=? AND missing=0""",
+                        (requested_id,),
+                    ).fetchone()
+                    if selected_row is not None:
+                        sessions = [dict(selected_row)] + sessions[:23]
+                        ids.add(requested_id)
+                selected_file_id = requested_id if requested_id in ids else (
                     int(sessions[0]["file_id"]) if sessions else None
                 )
                 if selected_file_id is not None:

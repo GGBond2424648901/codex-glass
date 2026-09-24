@@ -39,7 +39,11 @@ HTML_PAGE = resource_path("assets", "web", "dashboard.html").read_text(encoding=
 
 class Handler(BaseHTTPRequestHandler):
     def log_request(self, code="-", size="-"):
-        if str(code) == "200" and urlparse(self.path).path == "/api/live-activity":
+        parsed = urlparse(self.path)
+        if str(code) == "200" and parsed.path in ("/api/live-activity", "/api/widget"):
+            return
+        if parsed.query:
+            self.log_message('"%s %s %s" %s %s', self.command, parsed.path, self.request_version, str(code), str(size))
             return
         super().log_request(code, size)
 

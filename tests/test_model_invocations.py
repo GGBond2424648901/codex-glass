@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import time
 import tracemalloc
@@ -58,7 +59,119 @@ class ModelInvocationTests(unittest.TestCase):
 
     def test_short_names_preserve_unknown_models(self):
         self.assertEqual("Astra", short_model_name("gpt-6-astra"))
+        self.assertEqual("Sol", short_model_name("gpt-6-sol"))
+        self.assertEqual("Luna", short_model_name("gpt-6-luna"))
         self.assertEqual("custom-model", short_model_name("custom-model"))
+
+    def test_active_conversation_reads_its_local_codex_title_without_chat_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            sessions = home / "sessions"
+            sessions.mkdir()
+            path = sessions / "current.jsonl"
+            _write(path, [
+                {"type": "session_meta", "payload": {"session_id": "thread-titled"}},
+                {"type": "turn_context", "payload": {"turn_id": "turn", "model": "gpt-6-sol"}},
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+            ])
+            database = sqlite3.connect(home / "state_7.sqlite")
+            try:
+                database.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, name TEXT)")
+                database.execute("INSERT INTO threads VALUES (?,?,?)", (
+                    "thread-titled", "对话正文不应作为标题", "Codex Glass 速率优化"
+                ))
+                database.commit()
+            finally:
+                database.close()
+            result = live_model_activity(None, sessions, sampler=LiveTelemetrySampler())
+            self.assertEqual("Codex Glass 速率优化", result["conversations"][0]["title"])
+
+    def test_selected_conversation_counts_all_children_amid_newer_unrelated_agents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stamp = "2026-09-23T00:00:10Z"
+            main = root / "selected-main.jsonl"
+            _write(main, [
+                {"type": "session_meta", "payload": {"session_id": "selected-root"}},
+                {"type": "turn_context", "payload": {"turn_id": "selected-turn", "model": "gpt-6-sol"}},
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+            ])
+            rows = [{"path": str(main), "last_model": None, "mtime_ns": 1000}]
+            for index in range(10):
+                child = root / f"selected-child-{index}.jsonl"
+                _write(child, [
+                    {"type": "session_meta", "payload": {"session_id": f"selected-child-{index}",
+                        "source": {"subagent": {"thread_spawn": {"parent_thread_id": "selected-root"}}}}},
+                    {"type": "turn_context", "payload": {"turn_id": f"child-turn-{index}", "model": "gpt-6-luna"}},
+                    {"type": "event_msg", "payload": {"type": "task_started"}},
+                    {"timestamp": stamp, "type": "event_msg", "payload": {"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 10}
+                    }}},
+                ])
+                rows.append({"path": str(child), "last_model": None, "mtime_ns": 1001 + index})
+            for index in range(110):
+                child = root / f"unrelated-{index}.jsonl"
+                _write(child, [
+                    {"type": "session_meta", "payload": {"session_id": f"unrelated-{index}",
+                        "source": {"subagent": {"thread_spawn": {"parent_thread_id": "elsewhere"}}}}},
+                    {"type": "event_msg", "payload": {"type": "task_started"}},
+                ])
+                rows.append({"path": str(child), "last_model": None, "mtime_ns": 2000 + index})
+            automatic = live_model_activity(
+                _Index(rows), sampler=LiveTelemetrySampler(), now=1790121611,
+            )
+            self.assertEqual("selected-root", automatic["selected_conversation_id"])
+            self.assertEqual(100.0, automatic["conversations"][0]["telemetry"]["output_tps"])
+            result = live_model_activity(
+                _Index(rows), selected_conversation_id="selected-root",
+                sampler=LiveTelemetrySampler(), now=1790121611,
+            )
+            selected = result["conversations"][0]
+            self.assertEqual("selected-root", selected["conversation_id"])
+            self.assertEqual(100.0, selected["telemetry"]["output_tps"])
+            self.assertEqual(11, len(selected["agents"]))
+
+    def test_selected_conversation_preserves_older_nested_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stamp = "2026-09-23T00:00:10Z"
+            main = root / "root.jsonl"
+            direct = root / "direct.jsonl"
+            nested = root / "nested.jsonl"
+
+            def records(session_id, parent=None, output=0):
+                meta = {"session_id": session_id}
+                if parent:
+                    meta["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}
+                return [
+                    {"type": "session_meta", "payload": meta},
+                    {"type": "turn_context", "payload": {"turn_id": session_id, "model": "gpt-6-sol"}},
+                    {"type": "event_msg", "payload": {"type": "task_started"}},
+                    {"timestamp": stamp, "type": "event_msg", "payload": {"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": output}
+                    }}},
+                ]
+
+            _write(main, records("root"))
+            _write(direct, records("direct", "root", 20))
+            _write(nested, records("nested", "direct", 30))
+            # Reverse lineage order defeats a single forward transitive pass.
+            rows = [
+                {"path": str(nested), "last_model": None, "mtime_ns": 1000},
+                {"path": str(direct), "last_model": None, "mtime_ns": 1001},
+                {"path": str(main), "last_model": None, "mtime_ns": 999},
+            ]
+            for index in range(110):
+                other = root / f"unrelated-{index}.jsonl"
+                _write(other, records(f"unrelated-{index}", "other"))
+                rows.append({"path": str(other), "last_model": None, "mtime_ns": 2000 + index})
+            result = live_model_activity(
+                _Index(rows), selected_conversation_id="root",
+                sampler=LiveTelemetrySampler(), now=1790121611,
+            )
+            selected = result["conversations"][0]
+            self.assertEqual(50.0, selected["telemetry"]["output_tps"])
+            self.assertEqual(3, len(selected["agents"]))
 
     def test_live_file_is_discovered_before_sqlite_has_indexed_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -400,7 +513,7 @@ class ModelInvocationTests(unittest.TestCase):
             result = live_model_activity(_Index(rows), sampler=sampler, now=1790121621)
             conversations = {row["conversation_id"]: row for row in result["conversations"]}
             self.assertEqual({"root-a", "root-b"}, set(conversations))
-            self.assertEqual(100.0, conversations["root-b"]["telemetry"]["output_tps"])
+            self.assertEqual(300.0, conversations["root-b"]["telemetry"]["output_tps"])
             self.assertIsNone(conversations["root-a"]["telemetry"])
             self.assertEqual({str(root / "main-b.jsonl"), str(root / "child-b.jsonl")}, set(sampler._states))
             switched = live_model_activity(
@@ -408,10 +521,10 @@ class ModelInvocationTests(unittest.TestCase):
             )
             by_id = {row["conversation_id"]: row for row in switched["conversations"]}
             self.assertEqual("root-a", switched["selected_conversation_id"])
-            self.assertEqual(40.0, by_id["root-a"]["telemetry"]["output_tps"])
+            self.assertEqual(120.0, by_id["root-a"]["telemetry"]["output_tps"])
             self.assertIsNone(by_id["root-b"]["telemetry"])
-            self.assertEqual(20.0, by_id["root-a"]["agents"][0]["telemetry"]["output_tps"])
-            self.assertEqual(10.0, by_id["root-a"]["agents"][1]["telemetry"]["output_tps"])
+            self.assertEqual(60.0, by_id["root-a"]["agents"][0]["telemetry"]["output_tps"])
+            self.assertEqual(30.0, by_id["root-a"]["agents"][1]["telemetry"]["output_tps"])
             self.assertEqual(
                 {str(root / "main-a.jsonl"), str(root / "child-a.jsonl"), str(root / "nested-a.jsonl")},
                 set(sampler._states),
@@ -512,7 +625,7 @@ class ModelInvocationTests(unittest.TestCase):
                 return f"session-{self.number}.jsonl"
 
         number_offset = time.time_ns()
-        with mock.patch("codex_glass.core.invocations._session_role", new=lambda _path: ("subagent", None)):
+        with mock.patch("codex_glass.core.invocations._session_role", new=lambda _path: ("subagent", None, None)):
             tracemalloc.start()
             try:
                 selected = _rank_session_paths(
@@ -565,8 +678,91 @@ class ModelInvocationTests(unittest.TestCase):
                 _, peak = tracemalloc.get_traced_memory()
             finally:
                 tracemalloc.stop()
-            self.assertEqual(40.0, result["conversations"][0]["telemetry"]["output_tps"])
+            self.assertEqual(120.0, result["conversations"][0]["telemetry"]["output_tps"])
             self.assertLess(peak, 4 * 1024 * 1024, f"active poll allocated {peak:,} bytes")
+
+    def test_warm_metadata_poll_reads_only_appended_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "growing.jsonl"
+            chatter = json.dumps({"type": "response_item", "payload": {"text": "x" * 900}}).encode() + b"\n"
+            with path.open("wb") as stream:
+                stream.write(b'{"type":"session_meta","payload":{"session_id":"growing"}}\n')
+                for _ in range(7000):
+                    stream.write(chatter)
+                stream.write(b'{"type":"turn_context","payload":{"turn_id":"old","model":"gpt-6-sol"}}\n')
+                stream.write(b'{"type":"event_msg","payload":{"type":"task_started"}}\n')
+
+            sampler = LiveTelemetrySampler()
+
+            def poll():
+                return live_model_activity(
+                    _Index([{"path": str(path), "last_model": None, "mtime_ns": path.stat().st_mtime_ns}]),
+                    sampler=sampler,
+                )
+
+            self.assertEqual("gpt-6-sol", poll()["agents"][0]["requested_model"])
+            with path.open("ab") as stream:
+                stream.write(b'{"type":"turn_context","payload":{"turn_id":"new","model":"gpt-6-luna"}}\n')
+
+            bytes_read = [0]
+            original_open = Path.open
+
+            class CountedStream:
+                def __init__(self, stream):
+                    self.stream = stream
+
+                def __enter__(self):
+                    self.stream.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.stream.__exit__(*args)
+
+                def __getattr__(self, name):
+                    return getattr(self.stream, name)
+
+                def read(self, *args):
+                    data = self.stream.read(*args)
+                    bytes_read[0] += len(data)
+                    return data
+
+                def readline(self, *args):
+                    data = self.stream.readline(*args)
+                    bytes_read[0] += len(data)
+                    return data
+
+            def counted_open(target, *args, **kwargs):
+                stream = original_open(target, *args, **kwargs)
+                return CountedStream(stream) if target == path else stream
+
+            with mock.patch.object(Path, "open", new=counted_open):
+                updated = poll()
+            self.assertEqual("gpt-6-luna", updated["agents"][0]["requested_model"])
+            self.assertLess(bytes_read[0], 32 * 1024, f"warm poll reread {bytes_read[0]:,} bytes")
+
+    def test_partial_appended_model_metadata_waits_for_newline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partial.jsonl"
+            _write(path, [
+                {"type": "session_meta", "payload": {"session_id": "partial"}},
+                {"type": "turn_context", "payload": {"turn_id": "one", "model": "gpt-6-sol"}},
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+            ])
+            sampler = LiveTelemetrySampler()
+
+            def poll():
+                return live_model_activity(
+                    _Index([{"path": str(path), "last_model": None, "mtime_ns": path.stat().st_mtime_ns}]),
+                    sampler=sampler,
+                )["agents"][0]["requested_model"]
+
+            self.assertEqual("gpt-6-sol", poll())
+            with path.open("ab") as stream:
+                stream.write(b'{"type":"turn_context","payload":{"turn_id":"two","model":"gpt-6-lu')
+            self.assertEqual("gpt-6-sol", poll())
+            with path.open("ab") as stream:
+                stream.write(b'na"}}\n')
+            self.assertEqual("gpt-6-luna", poll())
 
 
 if __name__ == "__main__":

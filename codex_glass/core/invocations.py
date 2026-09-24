@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timedelta
 from heapq import heappush, heapreplace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from codex_glass.core.live_telemetry import DEFAULT_SAMPLER, LiveTelemetrySampler, _timestamp
 
@@ -19,8 +21,9 @@ _TAIL_BYTES = 4 * 1024 * 1024
 _MAX_RECORD_BYTES = 1024 * 1024
 _MAX_REVERSE_SCAN = 64 * 1024 * 1024
 _REVERSE_CHUNK = 1024 * 1024
-_PROJECTION_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
+_PROJECTION_CACHE: dict[str, tuple[int, int, dict[str, Any] | None, int]] = {}
 _DISCOVERY_CACHE: dict[str, tuple[float, float, list[Path]]] = {}
+_TITLE_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -28,11 +31,68 @@ def short_model_name(model: str | None) -> str:
     value = (model or "").strip()
     known = {
         "gpt-6-astra": "Astra",
+        "gpt-6-sol": "Sol",
+        "gpt-6-luna": "Luna",
         "gpt-5.6-sol": "Sol",
         "gpt-5.6-terra": "Terra",
         "gpt-5.6-luna": "Luna",
     }
     return known.get(value, value.removeprefix("gpt-") or "未知")
+
+
+def _local_thread_titles(session_ids: list[str], sessions_dir: Path | None) -> dict[str, str]:
+    """Read only Codex's thread title metadata, never conversation messages."""
+
+    if not session_ids or sessions_dir is None:
+        return {}
+    homes = [Path(sessions_dir).parent]
+    state_files = (
+        path for home in homes for path in sorted(
+            home.glob("state_*.sqlite"),
+            key=lambda item: int(item.stem.rsplit("_", 1)[-1])
+            if item.stem.rsplit("_", 1)[-1].isdigit() else -1,
+            reverse=True,
+        )
+    )
+    database_path = next((path for path in state_files if path.is_file()), None)
+    if database_path is None:
+        return {}
+    source = str(database_path)
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        cached = {session_id: _TITLE_CACHE.get((source, session_id)) for session_id in session_ids}
+    missing = [session_id for session_id, value in cached.items() if value is None or value[0] <= now]
+    if missing:
+        found: dict[str, str | None] = {session_id: None for session_id in missing}
+        placeholders = ",".join("?" for _ in missing)
+        try:
+            with closing(sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.2)) as connection:
+                try:
+                    rows = connection.execute(
+                        f"SELECT id,name,title FROM threads WHERE id IN ({placeholders})", missing
+                    )
+                except sqlite3.OperationalError:
+                    rows = connection.execute(
+                        f"SELECT id,title,title FROM threads WHERE id IN ({placeholders})", missing
+                    )
+                for session_id, name, title in rows:
+                    value = " ".join(str(name or title or "").split())[:120]
+                    found[str(session_id)] = value or None
+        except (OSError, sqlite3.Error):
+            pass
+        with _CACHE_LOCK:
+            for session_id, title in found.items():
+                _TITLE_CACHE[(source, session_id)] = (now + 15, title)
+            if len(_TITLE_CACHE) > 512:
+                for stale in list(_TITLE_CACHE)[:-512]:
+                    _TITLE_CACHE.pop(stale, None)
+    with _CACHE_LOCK:
+        return {
+            session_id: title
+            for session_id in session_ids
+            if (entry := _TITLE_CACHE.get((source, session_id))) is not None
+            if (title := entry[1]) is not None
+        }
 
 
 def _safe_json(raw: bytes) -> dict[str, Any] | None:
@@ -53,7 +113,9 @@ def _first_record(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _tail_records(path: Path) -> Iterable[dict[str, Any]]:
+def _tail_records(
+    path: Path, *, start_offset: int | None = None, cursor_out: list[int] | None = None
+) -> Iterable[dict[str, Any]]:
     """Stream bounded tail lines; never materialize the tail or retain message bodies."""
 
     markers = (
@@ -67,10 +129,10 @@ def _tail_records(path: Path) -> Iterable[dict[str, Any]]:
     try:
         size = path.stat().st_size
         with path.open("rb") as stream:
-            start = max(0, size - _TAIL_BYTES)
+            start = max(0, size - _TAIL_BYTES) if start_offset is None else min(max(0, start_offset), size)
             stream.seek(start)
             remaining = size - start
-            if start:
+            if start and start_offset is None:
                 # The seek may land inside a record. Discard that line in
                 # bounded pieces before looking for complete metadata.
                 while remaining:
@@ -80,14 +142,21 @@ def _tail_records(path: Path) -> Iterable[dict[str, Any]]:
                     remaining -= len(discarded)
                     if discarded.endswith(b"\n"):
                         break
+            if cursor_out is not None:
+                cursor_out[0] = stream.tell()
             while remaining:
+                line_start = stream.tell()
                 raw = stream.readline(min(_MAX_RECORD_BYTES + 1, remaining))
                 if not raw:
                     break
                 remaining -= len(raw)
                 if not raw.endswith(b"\n"):
-                    # Oversized or in-progress records are not metadata. Skip
-                    # their remainder without concatenating any bytes.
+                    # Keep a partial final line for the next append. Oversized
+                    # complete lines can be skipped without retaining content.
+                    if len(raw) <= _MAX_RECORD_BYTES:
+                        if cursor_out is not None:
+                            cursor_out[0] = line_start
+                        break
                     while remaining:
                         discarded = stream.readline(min(_MAX_RECORD_BYTES + 1, remaining))
                         if not discarded:
@@ -95,7 +164,11 @@ def _tail_records(path: Path) -> Iterable[dict[str, Any]]:
                         remaining -= len(discarded)
                         if discarded.endswith(b"\n"):
                             break
+                    if cursor_out is not None:
+                        cursor_out[0] = stream.tell()
                     continue
+                if cursor_out is not None:
+                    cursor_out[0] = stream.tell()
                 raw = raw[:-1]
                 if len(raw) > _MAX_RECORD_BYTES or not any(
                     marker in raw for marker in markers
@@ -182,6 +255,8 @@ def _session_projection(
     fallback_model: str | None,
     mtime_ns: int,
     previous: dict[str, Any] | None = None,
+    start_offset: int | None = None,
+    cursor_out: list[int] | None = None,
 ) -> dict[str, Any] | None:
     first = _first_record(path)
     if not first or first.get("type") != "session_meta":
@@ -213,7 +288,7 @@ def _session_projection(
         last_task_event = (
             "task_started" if previous["status"] == "running" else "task_complete"
         )
-    for record in _tail_records(path):
+    for record in _tail_records(path, start_offset=start_offset, cursor_out=cursor_out):
         payload = (
             record.get("payload") if isinstance(record.get("payload"), dict) else {}
         )
@@ -242,7 +317,7 @@ def _session_projection(
         ) and payload.get("model"):
             response_model = str(payload["model"])
 
-    if last_task_event is None or latest_turn is None:
+    if previous is None and (last_task_event is None or latest_turn is None):
         fallback_state, fallback_turn = _reverse_metadata(path)
         if last_task_event is None and fallback_state is not None:
             last_task_event = (
@@ -304,15 +379,18 @@ def _cached_projection(
             return dict(cached[2]) if cached[2] is not None else None
         previous = (
             dict(cached[2])
-            if cached and cached[2] is not None and size >= cached[1]
+            if cached and cached[2] is not None and 0 < size - cached[1] <= _TAIL_BYTES
             else None
         )
-    value = _session_projection(path, fallback_model, mtime_ns, previous)
+        start_offset = cached[3] if previous is not None else None
+    cursor = [start_offset or 0]
+    value = _session_projection(path, fallback_model, mtime_ns, previous, start_offset, cursor)
     with _CACHE_LOCK:
         _PROJECTION_CACHE[key] = (
             mtime_ns,
             size,
             dict(value) if value is not None else None,
+            cursor[0],
         )
         if len(_PROJECTION_CACHE) > 128:
             for stale in list(_PROJECTION_CACHE)[:-128]:
@@ -329,33 +407,41 @@ def _offer_candidate(heap: list, item: tuple, limit: int) -> None:
         heapreplace(heap, item)
 
 
-def _session_role(path: Path) -> tuple[str | None, str | None]:
+def _session_role(path: Path) -> tuple[str | None, str | None, str | None]:
     first = _first_record(path)
     if not first or first.get("type") != "session_meta":
-        return None, None
+        return None, None, None
     payload = first.get("payload")
     if not isinstance(payload, dict):
-        return None, None
+        return None, None, None
     source = payload.get("source")
     subagent = source.get("subagent") if isinstance(source, dict) else None
     spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
-    return ("subagent" if isinstance(spawn, dict) else "main", payload.get("session_id") or payload.get("id"))
+    return (
+        "subagent" if isinstance(spawn, dict) else "main",
+        payload.get("session_id") or payload.get("id"),
+        spawn.get("parent_thread_id") if isinstance(spawn, dict) else None,
+    )
 
 
 def _rank_session_paths(
-    paths: Iterable[tuple[Path, int, str | None]], limit: int, selected_conversation_id: str | None,
+    paths: Iterable[tuple[Path, int, str | None]] | Callable[[], Iterable[tuple[Path, int, str | None]]],
+    limit: int, selected_conversation_id: str | None,
     *, recent_only: bool,
 ) -> list[tuple[Path, int, str | None]]:
     """Keep bounded main and child candidates independently, so children cannot evict roots."""
 
     main_heap: list[tuple[int, str, Path, str | None]] = []
     child_heap: list[tuple[int, str, Path, str | None]] = []
+    selected_children: list[tuple[int, str, Path, str | None]] = []
+    selected_ids = {selected_conversation_id} if selected_conversation_id else set()
     selected_root = None
     cutoff = int((time.time() - 86400) * 1_000_000_000) if recent_only else 0
-    for path, mtime_ns, fallback_model in paths:
+    source = paths if callable(paths) else lambda: iter(paths)
+    for path, mtime_ns, fallback_model in source():
         if mtime_ns < cutoff:
             continue
-        role, session_id = _session_role(path)
+        role, session_id, parent_id = _session_role(path)
         item = (mtime_ns, str(path), path, fallback_model)
         if role == "main":
             _offer_candidate(main_heap, item, limit)
@@ -363,7 +449,30 @@ def _rank_session_paths(
                 selected_root = item
         elif role == "subagent":
             _offer_candidate(child_heap, item, max(8, limit * 4))
-    ranked = sorted(main_heap + child_heap + ([selected_root] if selected_root else []), reverse=True)
+            if selected_conversation_id and parent_id == selected_conversation_id:
+                _offer_candidate(selected_children, item, 128)
+                if session_id and len(selected_ids) < 128:
+                    selected_ids.add(session_id)
+    # The global child heap may evict an older nested agent. Revisit the
+    # source only for a selected conversation in a crowded archive; retain a
+    # bounded transitive subtree even when descendants precede their parents.
+    if selected_root and selected_children and len(child_heap) >= max(8, limit * 4):
+        for _depth in range(8):
+            before = len(selected_ids)
+            for path, mtime_ns, fallback_model in source():
+                if mtime_ns < cutoff:
+                    continue
+                role, session_id, parent_id = _session_role(path)
+                if role != "subagent" or parent_id not in selected_ids:
+                    continue
+                item = (mtime_ns, str(path), path, fallback_model)
+                if item not in selected_children:
+                    _offer_candidate(selected_children, item, 128)
+                if session_id and len(selected_ids) < 128:
+                    selected_ids.add(session_id)
+            if len(selected_ids) == before or len(selected_ids) >= 128:
+                break
+    ranked = sorted(main_heap + child_heap + selected_children + ([selected_root] if selected_root else []), reverse=True)
     return list(dict.fromkeys((item[2], item[0], item[3]) for item in ranked))
 
 
@@ -392,21 +501,28 @@ def _fast_session_paths(root: Path, known: list[Path]) -> Iterable[Path]:
 
 
 def _recent_session_files(
-    sessions_dir: Path, limit: int, selected_conversation_id: str | None = None
+    sessions_dir: Path, limit: int, selected_conversation_id: str | None = None,
+    *, reuse_root_cache: bool = False,
 ) -> list[tuple[Path, os.stat_result]]:
     root = Path(sessions_dir).resolve()
-    key = os.path.normcase(str(root))
+    key = os.path.normcase(str(root)) + "\0" + (selected_conversation_id or "")
     now = time.monotonic()
     with _CACHE_LOCK:
         cached = _DISCOVERY_CACHE.get(key)
-    if cached and cached[0] > now:
+        borrowed = False
+        if cached is None and reuse_root_cache:
+            cached = _DISCOVERY_CACHE.get(os.path.normcase(str(root)) + "\0")
+            borrowed = cached is not None
+    if cached and cached[0] > now and not borrowed:
         paths = cached[2]
     else:
         full_scan = cached is None or now - cached[1] >= 60
         try:
-            source = root.rglob("*.jsonl") if full_scan else _fast_session_paths(root, cached[2])
+            def source_paths():
+                source = root.rglob("*.jsonl") if full_scan else _fast_session_paths(root, cached[2])
+                return _stat_session_paths(source)
             paths = [path for path, _mtime, _model in _rank_session_paths(
-                _stat_session_paths(source), limit, selected_conversation_id, recent_only=True
+                source_paths, limit, selected_conversation_id, recent_only=True
             )]
         except OSError:
             paths = []
@@ -432,6 +548,7 @@ def live_model_activity(
     selected_conversation_id: str | None = None,
     sampler: LiveTelemetrySampler | None = None,
     now: float | None = None,
+    _reuse_recent_discovery: bool = False,
 ) -> dict[str, Any]:
     """Project active root conversations and their own child usage samples."""
 
@@ -443,14 +560,17 @@ def live_model_activity(
     if sessions_dir is None and index is not None:
         try:
             with index.read_transaction() as reader:
-                indexed = reader.execute(
+                query = (
                     """SELECT path,last_model,mtime_ns FROM session_files
-                       WHERE missing=0 AND error IS NULL AND mtime_ns>=?""",
-                    (int((time.time() - 86400) * 1_000_000_000),),
+                       WHERE missing=0 AND error IS NULL AND mtime_ns>=?"""
                 )
+                cutoff = int((time.time() - 86400) * 1_000_000_000)
+                def indexed_paths():
+                    indexed = reader.execute(query, (cutoff,))
+                    return ((Path(row["path"]), int(row["mtime_ns"] or 0), row["last_model"]) for row in indexed)
                 # SQLite cursors stream rows; do not materialize the whole archive.
                 rows = _rank_session_paths(
-                    ((Path(row["path"]), int(row["mtime_ns"] or 0), row["last_model"]) for row in indexed),
+                    indexed_paths,
                     max_candidates, selected_conversation_id, recent_only=False,
                 )
         except Exception:
@@ -467,7 +587,10 @@ def live_model_activity(
             "mtime_ns": mtime_ns, "size": stat.st_size,
         }
     if sessions_dir is not None:
-        for path, stat in _recent_session_files(Path(sessions_dir), max_candidates, selected_conversation_id):
+        for path, stat in _recent_session_files(
+            Path(sessions_dir), max_candidates, selected_conversation_id,
+            reuse_root_cache=_reuse_recent_discovery,
+        ):
             key = os.path.normcase(str(path.resolve()))
             current = candidates.get(key)
             if current is None or stat.st_mtime_ns > current["mtime_ns"]:
@@ -532,7 +655,7 @@ def live_model_activity(
         if not active:
             continue
         related.sort(key=lambda item: (item["status"] != "running", -item["mtime_ns"]))
-        members = [main] + related[:8]
+        members = [main] + related
         agents = [{key: value for key, value in item.items() if key != "_path"} for item in members]
         conversation_id = str(session_id or "local-" + hashlib.sha256(
             str(main["_path"]).encode("utf-8")
@@ -547,10 +670,25 @@ def live_model_activity(
             "response_model_available": any(item.get("response_model") for item in members),
         })
     conversations.sort(key=lambda item: item["last_activity_ns"], reverse=True)
+    titles = _local_thread_titles(
+        [row["conversation_id"] for row in conversations], sessions_dir
+    )
+    for row in conversations:
+        row["title"] = titles.get(row["conversation_id"]) or f'对话 {row["conversation_id"][:8]}'
+        row["title_source"] = "codex_state" if row["conversation_id"] in titles else "session_id"
     selected = next(
         (row for row in conversations if row["conversation_id"] == selected_conversation_id),
         conversations[0] if conversations else None,
     )
+    if selected is not None and selected_conversation_id is None:
+        # The first request has no chosen ID yet. Candidate ranking cannot
+        # reserve this root's descendants until it knows which active root
+        # will be shown, so redo only that initial projection with the ID.
+        return live_model_activity(
+            index, sessions_dir, max_candidates,
+            selected_conversation_id=selected["conversation_id"],
+            sampler=sampler, now=now, _reuse_recent_discovery=True,
+        )
     if selected is not None:
         members = members_by_id[selected["conversation_id"]]
         sampler.retain_paths([item["_path"] for item in members])
