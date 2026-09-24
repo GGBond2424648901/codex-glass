@@ -1,7 +1,7 @@
 """Presentation-only data helpers: never infer live throughput from imported history."""
 
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 import sqlite3
 import json
 
@@ -125,6 +125,54 @@ def local_rate_limits(coordinator):
     else:
         result = coordinator.snapshot().get("rate_limits") or {"limits": []}
     return result
+
+
+def local_rate_history(coordinator, *, seconds=300, file_id=None, now=None):
+    """Read one local session file's completed-call output, only on demand."""
+    seconds = max(1, min(900, int(seconds)))
+    now = now or datetime.now()
+    if now.tzinfo is not None:
+        now = now.astimezone().replace(tzinfo=None)
+    end = now.replace(microsecond=0)
+    start = end - timedelta(seconds=seconds - 1)
+    labels = [(start + timedelta(seconds=offset)).isoformat() for offset in range(seconds)]
+    values = [0] * seconds
+    sessions = []
+    selected_file_id = None
+    index = getattr(coordinator, "index", None)
+    if index is not None:
+        try:
+            with index.read_transaction() as reader:
+                bounds = (start.isoformat(), (end + timedelta(seconds=1)).isoformat())
+                rows = reader.execute(
+                    """SELECT e.file_id,COALESCE(f.last_model,MAX(e.model),'未记录模型') AS model,
+                       MAX(e.occurred_at) AS last_at
+                    FROM usage_events e JOIN session_files f ON f.file_id=e.file_id
+                    WHERE f.missing=0 AND e.occurred_at>=? AND e.occurred_at<?
+                    GROUP BY e.file_id ORDER BY last_at DESC,e.file_id DESC LIMIT 24""",
+                    bounds,
+                )
+                sessions = [dict(row) for row in rows]
+                ids = {int(row["file_id"]) for row in sessions}
+                selected_file_id = int(file_id) if file_id is not None and int(file_id) in ids else (
+                    int(sessions[0]["file_id"]) if sessions else None
+                )
+                if selected_file_id is not None:
+                    rows = reader.execute(
+                        """SELECT substr(occurred_at,1,19) AS second,SUM(output_tokens) AS output
+                        FROM usage_events WHERE file_id=? AND occurred_at>=? AND occurred_at<?
+                        GROUP BY substr(occurred_at,1,19)""",
+                        (selected_file_id, *bounds),
+                    )
+                    by_second = {row["second"]: max(0, int(row["output"] or 0)) for row in rows}
+                    values = [by_second.get(label, 0) for label in labels]
+        except (sqlite3.Error, RuntimeError):
+            pass
+    return {
+        "seconds": seconds, "labels": labels, "values": values,
+        "sessions": sessions, "selected_file_id": selected_file_id,
+        "source": "local_completed_calls",
+    }
 
 
 def desktop_snapshot(coordinator, *, selected_conversation_id=None):

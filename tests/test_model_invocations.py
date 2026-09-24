@@ -397,21 +397,21 @@ class ModelInvocationTests(unittest.TestCase):
             ])
             rows.append({"path": str(nested), "last_model": "gpt-5.6-terra", "mtime_ns": 1})
             sampler = LiveTelemetrySampler()
-            result = live_model_activity(_Index(rows), sampler=sampler, now=1790121630)
+            result = live_model_activity(_Index(rows), sampler=sampler, now=1790121621)
             conversations = {row["conversation_id"]: row for row in result["conversations"]}
             self.assertEqual({"root-a", "root-b"}, set(conversations))
-            self.assertEqual(5.0, conversations["root-b"]["telemetry"]["output_tps"])
+            self.assertEqual(100.0, conversations["root-b"]["telemetry"]["output_tps"])
             self.assertIsNone(conversations["root-a"]["telemetry"])
             self.assertEqual({str(root / "main-b.jsonl"), str(root / "child-b.jsonl")}, set(sampler._states))
             switched = live_model_activity(
-                _Index(rows), selected_conversation_id="root-a", sampler=sampler, now=1790121630
+                _Index(rows), selected_conversation_id="root-a", sampler=sampler, now=1790121621
             )
             by_id = {row["conversation_id"]: row for row in switched["conversations"]}
             self.assertEqual("root-a", switched["selected_conversation_id"])
-            self.assertEqual(2.0, by_id["root-a"]["telemetry"]["output_tps"])
+            self.assertEqual(40.0, by_id["root-a"]["telemetry"]["output_tps"])
             self.assertIsNone(by_id["root-b"]["telemetry"])
-            self.assertEqual(1.0, by_id["root-a"]["agents"][0]["telemetry"]["output_tps"])
-            self.assertEqual(0.5, by_id["root-a"]["agents"][1]["telemetry"]["output_tps"])
+            self.assertEqual(20.0, by_id["root-a"]["agents"][0]["telemetry"]["output_tps"])
+            self.assertEqual(10.0, by_id["root-a"]["agents"][1]["telemetry"]["output_tps"])
             self.assertEqual(
                 {str(root / "main-a.jsonl"), str(root / "child-a.jsonl"), str(root / "nested-a.jsonl")},
                 set(sampler._states),
@@ -546,6 +546,27 @@ class ModelInvocationTests(unittest.TestCase):
                     stream.write(json.dumps(record, separators=(",", ":")).encode() + b"\n")
             result = live_model_activity(None, root, sampler=LiveTelemetrySampler())
             self.assertEqual(["long-running"], [row["conversation_id"] for row in result["conversations"]])
+
+    def test_modified_large_active_log_is_projected_without_multimegabyte_tail_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large-active.jsonl"
+            chatter = json.dumps({"type": "response_item", "payload": {"text": "x" * 900}}).encode() + b"\n"
+            with path.open("wb") as stream:
+                stream.write(b'{"type":"session_meta","payload":{"session_id":"large-active"}}\n')
+                for _ in range(7000):
+                    stream.write(chatter)
+                stream.write(b'{"type":"turn_context","payload":{"turn_id":"large-turn","model":"gpt-6-sol"}}\n')
+                stream.write(b'{"type":"event_msg","payload":{"type":"task_started"}}\n')
+                stream.write(b'{"timestamp":"2026-09-23T00:00:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":120}}}}\n')
+            rows = [{"path": str(path), "mtime_ns": path.stat().st_mtime_ns, "last_model": None}]
+            tracemalloc.start()
+            try:
+                result = live_model_activity(_Index(rows), sampler=LiveTelemetrySampler(), now=1790121611)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertEqual(40.0, result["conversations"][0]["telemetry"]["output_tps"])
+            self.assertLess(peak, 4 * 1024 * 1024, f"active poll allocated {peak:,} bytes")
 
 
 if __name__ == "__main__":

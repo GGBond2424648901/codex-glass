@@ -65,6 +65,24 @@ class GlassUITests(unittest.TestCase):
         self.assertFalse(self.widget.compact_mode)
         self.assertTrue(self.widget.invocation.expanded)
 
+    def test_live_widget_checks_for_new_usage_every_second(self):
+        self.assertEqual(1000, self.widget.live_timer.interval())
+        self.assertEqual(3000, self.widget.timer.interval())
+
+    def test_live_activity_updates_rate_without_replacing_historical_summary(self):
+        data = telemetry()
+        conversation = invocation_activity()
+        conversation["conversation_id"] = "one"
+        conversation["telemetry"] = {"output_tps": 2.0, "status": "recent"}
+        data["model_activity"] = {"active": True, "conversations": [conversation]}
+        self.widget.apply_data(data)
+        historical_cost = self.widget.cost.text()
+        conversation["telemetry"] = {"output_tps": 12.0, "status": "recent"}
+        self.widget.apply_live_activity({"active": True, "conversations": [conversation]})
+        self.assertIn("12", self.widget.conversation_button.text())
+        self.assertEqual(historical_cost, self.widget.cost.text())
+        self.assertEqual(data["total"], self.widget.data["total"])
+
     def test_mini_telemetry_and_conversation_selection_stay_separate(self):
         data = telemetry()
         first = invocation_activity()
@@ -94,6 +112,8 @@ class GlassUITests(unittest.TestCase):
         self.assertFalse(self.widget.tokens.isVisible())
         self.assertTrue(self.widget.mini_rate_value.isVisible())
         self.assertIn("5", self.widget.mini_rate_value.text())
+        self.assertEqual("近3秒输出", self.widget.mini_rate_caption.text())
+        self.assertIn("已完成调用", self.widget.mini_rate_value.toolTip())
         self.assertEqual("60%", self.widget.mini_cache_value.text())
         self.assertTrue(self.widget.mini_quota.isVisible())
         self.assertEqual("5秒输出 Token", self.widget.mini_chart.unit)

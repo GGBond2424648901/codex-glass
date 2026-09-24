@@ -321,6 +321,14 @@ class NativeDashboard(QWidget):
             self.history_pending = True
             return
         generation = self.history_generation
+        if p.mode == "rate":
+            path = f"/api/rate-history?seconds={p.rate_seconds}"
+            if p.rate_file_id is not None:
+                path += f"&file_id={int(p.rate_file_id)}"
+            self.run_job("history", lambda: (
+                generation, self.get_json(path)
+            ))
+            return
         since, until = scope_bounds("this_week" if p.mode == "week" else self.scope)
         params = {
             "offset": p.offset,
@@ -366,8 +374,12 @@ class NativeDashboard(QWidget):
             self.pages["history"].render()
         elif key == "history":
             generation, payload = result
-            if generation == self.history_generation and self.pages["history"].mode != "sources":
-                self.pages["history"].apply_history(payload)
+            if generation == self.history_generation:
+                page = self.pages["history"]
+                if page.mode == "rate":
+                    page.apply_rate_history(payload)
+                elif page.mode != "sources":
+                    page.apply_history(payload)
         elif key == "refresh":
             self.toast.setText("正在增量扫描…")
             self.fetch()

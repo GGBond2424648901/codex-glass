@@ -19,6 +19,7 @@ from pathlib import Path
 _COLD_TAIL_BYTES = 4 * 1024 * 1024
 _MAX_RECORD_BYTES = 1024 * 1024
 _RETENTION_SECONDS = 300
+_RATE_WINDOW_SECONDS = 3
 _USAGE_RECORD_HEAD = re.compile(rb'"type"\s*:\s*"(?:event_msg|token_count)"')
 
 
@@ -219,25 +220,34 @@ class LiveTelemetrySampler:
     def summarize(self, paths: list[Path], *, now: float | None = None, active: bool = True) -> dict:
         """Aggregate only the explicitly related sessions passed by the caller."""
         now = time.time() if now is None else now
-        with self._lock:
-            samples: list[tuple[float, int, int, int]] = []
-            for path in dict.fromkeys(paths):
-                samples.extend(self._refresh(Path(path), now).samples)
-            self._expire_idle_locked(now)
-        recent = [item for item in samples if now - 60 <= item[0] <= now + 5]
-        cache_window = [item for item in samples if now - 300 <= item[0] <= now + 5]
-        output = sum(item[3] for item in recent)
-        inputs = sum(item[1] for item in cache_window)
-        cached = sum(item[2] for item in cache_window)
-        last_at = max((item[0] for item in samples), default=None)
+        output = 0
+        rate_output = 0
+        rate_seen = False
+        inputs = 0
+        cached = 0
+        last_at = None
         bins = [0] * 12
-        for timestamp, _input, _cache, count in recent:
-            position = min(11, max(0, int((timestamp - (now - 60)) // 5)))
-            bins[position] += count
+        with self._lock:
+            for path in dict.fromkeys(paths):
+                for timestamp, input_count, cache_count, count in self._refresh(Path(path), now).samples:
+                    last_at = timestamp if last_at is None else max(last_at, timestamp)
+                    if now - 300 <= timestamp <= now + 5:
+                        inputs += input_count
+                        cached += cache_count
+                    if now - 60 <= timestamp <= now + 5:
+                        output += count
+                        position = min(11, max(0, int((timestamp - (now - 60)) // 5)))
+                        bins[position] += count
+                    if now - _RATE_WINDOW_SECONDS < timestamp <= now:
+                        rate_output += count
+                        rate_seen = True
+            self._expire_idle_locked(now)
         return {
-            "status": "recent" if active and recent else "awaiting_usage" if active else "inactive",
-            "output_tps": round(output / 60, 2) if active and recent else None,
-            "output_tokens_60s": output if active and recent else 0,
+            "status": "recent" if active and rate_seen else "awaiting_usage" if active else "inactive",
+            "output_tps": round(rate_output / _RATE_WINDOW_SECONDS, 2) if active and rate_seen else None,
+            "output_tokens_3s": rate_output if active and rate_seen else 0,
+            "rate_window_seconds": _RATE_WINDOW_SECONDS,
+            "output_tokens_60s": output if active else 0,
             "cache_hit_percent": round(100 * cached / inputs, 1) if inputs else None,
             "cached_input_tokens_5m": cached,
             "input_tokens_5m": inputs,

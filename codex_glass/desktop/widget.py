@@ -351,6 +351,8 @@ class GlassWidget(QWidget):
         self.drag = None
         self.network_busy = False
         self.pending_fetch = False
+        self.live_busy = False
+        self.pending_live = False
         self.backend_process = None
         self.backend_next_attempt = 0
         self.backend_attempts = 0
@@ -492,7 +494,7 @@ class GlassWidget(QWidget):
         self.mini_page.setToolTip("切换总览 / 对话速率")
         self.mini_page.clicked.connect(lambda: self.set_mini_telemetry_mode(not self.mini_telemetry_mode))
         self.mini_page.hide()
-        self.mini_rate_caption = label(self, "近60秒输出", 12, MUTED)
+        self.mini_rate_caption = label(self, "近3秒输出", 12, MUTED)
         self.mini_rate_caption.setGeometry(30, 63, 155, 20)
         self.mini_rate_value = label(self, "—", 27, INK, True)
         self.mini_rate_value.setGeometry(30, 82, 171, 34)
@@ -532,11 +534,17 @@ class GlassWidget(QWidget):
         self.tray.show()
         self.manager = QNetworkAccessManager(self)
         self.manager.finished.connect(self.received)
+        self.live_manager = QNetworkAccessManager(self)
+        self.live_manager.finished.connect(self.received_live)
         self.timer = QTimer(self)
         self.timer.setInterval(3000)
         self.timer.timeout.connect(self.fetch)
         self.timer.timeout.connect(self.render_quota)
         self.timer.start()
+        self.live_timer = QTimer(self)
+        self.live_timer.setInterval(1000)
+        self.live_timer.timeout.connect(self.fetch_live)
+        self.live_timer.start()
         area = QApplication.primaryScreen().availableGeometry()
         self.move(area.right() - self.width() - 20, area.top() + 25)
         if persist:
@@ -571,12 +579,16 @@ class GlassWidget(QWidget):
         self.blur_active = native_blur(self)
         if hasattr(self, "timer"):
             self.timer.start()
+        if hasattr(self, "live_timer"):
+            self.live_timer.start()
         if hasattr(self, "flow_timer") and self.motion:
             self.flow_timer.start()
 
     def hideEvent(self, event):
         if hasattr(self, "timer"):
             self.timer.stop()
+        if hasattr(self, "live_timer"):
+            self.live_timer.stop()
         if hasattr(self, "flow_timer"):
             self.flow_timer.stop()
         super().hideEvent(event)
@@ -641,6 +653,13 @@ class GlassWidget(QWidget):
         if self.motion and old and old.get("total") != data.get("total"):
             self.flash.start()
 
+    def apply_live_activity(self, activity):
+        """Refresh only current-conversation telemetry; leave historical charts alone."""
+        if not isinstance(activity, dict) or not isinstance(activity.get("conversations"), list):
+            return
+        self.data["model_activity"] = activity
+        self.apply_model_activity()
+
     def apply_model_activity(self):
         activity = self.data.get("model_activity") or {}
         conversations = activity.get("conversations", []) if isinstance(activity, dict) else []
@@ -665,6 +684,7 @@ class GlassWidget(QWidget):
             value = telemetry.get("output_tps")
             speed = f"{value:g} tok/s" if isinstance(value, (int, float)) else "等待用量"
             self.conversation_button.setText(f"对话 {index}/{total} · {speed} ▾")
+            self.conversation_button.setToolTip("最近3秒已完成调用的输出 Token / 3 秒；每秒刷新，不是逐 Token 流式测速。")
             self.mini_activity.setText(
                 f"对话 {index}/{total} ▾" if self.mini_telemetry_mode
                 else f'{main.get("requested_model_short", "未知")} · 子{children}'
@@ -751,6 +771,7 @@ class GlassWidget(QWidget):
         self.selected_conversation_id = conversation_id
         self.apply_model_activity()
         self.fetch(queue_if_busy=True)
+        self.fetch_live(queue_if_busy=True)
 
     def set_mini_telemetry_mode(self, enabled):
         self.mini_telemetry_mode = bool(enabled)
@@ -769,7 +790,7 @@ class GlassWidget(QWidget):
         value = telemetry.get("output_tps")
         cache = telemetry.get("cache_hit_percent")
         self.mini_rate_caption.setText(
-            "近60秒输出" if value is not None
+            "近3秒输出" if value is not None
             else "生成中 · 等待用量" if self.current_conversation
             else "暂无活动对话"
         )
@@ -780,9 +801,10 @@ class GlassWidget(QWidget):
             size -= 1
         self.mini_rate_value.setFont(font(size, True))
         self.mini_cache_value.setText(f"{cache:g}%" if isinstance(cache, (int, float)) else "—")
-        status = "最近调用完成后更新" if value is not None else "生成中 · 等待用量记录"
+        status = "已完成调用 · 每秒刷新" if value is not None else "生成中 · 等待用量记录"
         note = (
-            f"{status}\n同一对话的主代理与子代理合计；每个对话单独统计。"
+            f"{status}\n速率 = 近3秒已完成调用输出 Token / 3秒；不是逐 Token 流式测速。"
+            "\n同一对话的主代理与子代理合计；每个对话单独统计。"
             "\n缓存命中 = 近5分钟缓存输入 / 总输入；来自调用完成后的本机记录。"
         )
         for target in (self.mini_rate_caption, self.mini_rate_value, self.mini_cache_caption, self.mini_cache_value):
@@ -1145,6 +1167,7 @@ class GlassWidget(QWidget):
         host.raise_()
         host.activateWindow()
         self.fetch()
+        self.fetch_live()
 
     def tray_activate(self, reason):
         if reason == QSystemTrayIcon.Trigger:
@@ -1266,6 +1289,39 @@ class GlassWidget(QWidget):
         request = QNetworkRequest(url)
         request.setTransferTimeout(10000)
         self.manager.get(request)
+
+    def fetch_live(self, *, queue_if_busy=False):
+        if not self.connected:
+            return
+        if self.live_busy:
+            if queue_if_busy:
+                self.pending_live = True
+            return
+        self.live_busy = True
+        url = QUrl(self.url + "/api/live-activity")
+        selected = self.selected_conversation_id or ""
+        if selected:
+            query = QUrlQuery()
+            query.addQueryItem("conversation_id", selected)
+            url.setQuery(query)
+        request = QNetworkRequest(url)
+        request.setTransferTimeout(5000)
+        reply = self.live_manager.get(request)
+        reply.setProperty("conversation_id", selected)
+
+    def received_live(self, reply):
+        self.live_busy = False
+        try:
+            if not reply.error() and reply.property("conversation_id") == (self.selected_conversation_id or ""):
+                activity = json.loads(bytes(reply.readAll()).decode("utf-8"))
+                self.apply_live_activity(activity)
+        except (ValueError, TypeError, OverflowError):
+            pass
+        finally:
+            reply.deleteLater()
+            if self.pending_live:
+                self.pending_live = False
+                QTimer.singleShot(0, self.fetch_live)
 
     def received(self, reply):
         self.network_busy = False

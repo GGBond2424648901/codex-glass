@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -20,15 +20,21 @@ def write_records(path, records):
     )
 
 
+def append_records(path, records):
+    with path.open("a", encoding="utf-8") as stream:
+        for item in records:
+            stream.write(json.dumps(item, separators=(",", ":")) + "\n")
+
+
 def main(exe):
     exe = Path(exe).resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="codex-glass-exe-telemetry-") as directory:
         root = Path(directory)
         sessions = root / "home" / "sessions"
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        initial_stamp = (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        def usage(input_tokens, cached, output):
-            return {"timestamp": stamp, "type": "event_msg", "payload": {
+        def usage(input_tokens, cached, output, *, at=None):
+            return {"timestamp": at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "type": "event_msg", "payload": {
                 "type": "token_count", "info": {"total_token_usage": {
                     "input_tokens": input_tokens,
                     "cached_input_tokens": cached,
@@ -41,7 +47,7 @@ def main(exe):
             {"type": "session_meta", "payload": {"session_id": "smoke-main"}},
             {"type": "turn_context", "payload": {"turn_id": "smoke-turn", "model": "gpt-6-sol"}},
             {"type": "event_msg", "payload": {"type": "task_started"}},
-            usage(100, 20, 60),
+            usage(100, 20, 60, at=initial_stamp),
         ])
         write_records(sessions / "child.jsonl", [
             {"type": "session_meta", "payload": {"session_id": "smoke-child", "source": {
@@ -51,7 +57,7 @@ def main(exe):
                 "turn_id": "smoke-child-turn", "root_turn_id": "smoke-turn", "model": "gpt-6-luna"
             }},
             {"type": "event_msg", "payload": {"type": "task_started"}},
-            usage(100, 50, 120),
+            usage(100, 50, 120, at=initial_stamp),
         ])
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
@@ -87,23 +93,26 @@ def main(exe):
                 raise RuntimeError(f"EXE backend did not return usage: {data and data.get('index')}")
             assert data["pricing"]["unpriced_calls"] == 0, data["pricing"]
             assert abs(data["total"]["estimated_cost_usd"] - 0.0008295) < 1e-6, data["total"]
-            assert data["server"]["version"] == "4.3.3", data["server"]
+            assert data["server"]["version"] == "4.3.4", data["server"]
             assert len(conversations) == 1, conversations
             result = conversations[0]
             assert result["conversation_id"] == "smoke-main", result
             assert len(result["agents"]) == 2, result
-            assert result["telemetry"]["output_tps"] == 3.0, result["telemetry"]
             assert result["telemetry"]["cache_hit_percent"] == 35.0, result["telemetry"]
             assert data["total"]["total_tokens"] == 380, data["total"]
-            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            append_records(sessions / "main.jsonl", [usage(150, 30, 90)])
+            append_records(sessions / "child.jsonl", [usage(200, 100, 180)])
+            with opener.open(url + "/api/live-activity?conversation_id=smoke-main", timeout=2) as response:
+                live = json.load(response)
+            assert live["conversations"][0]["telemetry"]["output_tps"] == 30.0, live
             today = datetime.now().astimezone()
             new_session = sessions / f"{today:%Y}" / f"{today:%m}" / f"{today:%d}" / "new-conversation.jsonl"
             write_records(new_session, [
                 {"type": "session_meta", "payload": {"session_id": "smoke-new"}},
-                {"timestamp": stamp, "type": "turn_context", "payload": {
+                {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "type": "turn_context", "payload": {
                     "turn_id": "smoke-new-turn", "model": "gpt-6-sol"
                 }},
-                usage(100, 20, 120),
+                usage(100, 20, 120, at=initial_stamp),
             ])
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
@@ -119,11 +128,12 @@ def main(exe):
             assert activity["selected_conversation_id"] == "smoke-main", activity
             by_id = {row["conversation_id"]: row for row in conversations}
             assert by_id["smoke-new"]["telemetry"] is None, by_id["smoke-new"]
-            with opener.open(url + "/api/widget?conversation_id=smoke-new", timeout=2) as response:
-                switched = json.load(response)["model_activity"]
+            append_records(new_session, [usage(150, 30, 240)])
+            with opener.open(url + "/api/live-activity?conversation_id=smoke-new", timeout=2) as response:
+                switched = json.load(response)
             by_id = {row["conversation_id"]: row for row in switched["conversations"]}
             assert switched["selected_conversation_id"] == "smoke-new", switched
-            assert by_id["smoke-new"]["telemetry"]["output_tps"] == 2.0, by_id["smoke-new"]
+            assert by_id["smoke-new"]["telemetry"]["output_tps"] == 40.0, by_id["smoke-new"]
             assert by_id["smoke-main"]["telemetry"] is None, by_id["smoke-main"]
             with opener.open(url + "/api/quota", timeout=2) as response:
                 quota = json.load(response)
@@ -134,7 +144,7 @@ def main(exe):
                 env=environment, creationflags=flags, timeout=70, check=True,
             )
             assert desktop.returncode == 0 and capture.stat().st_size > 1000
-            print("EXE smoke OK: v4.3.3, new conversation discovered and switched, selected-only telemetry, Qt capture")
+            print("EXE smoke OK: v4.3.4, 1s live endpoint, new conversation switched, selected-only telemetry, Qt capture")
         finally:
             if backend.poll() is None:
                 # The Windows one-file bootloader owns a child process. Stop only

@@ -54,7 +54,7 @@ def _first_record(path: Path) -> dict[str, Any] | None:
 
 
 def _tail_records(path: Path) -> Iterable[dict[str, Any]]:
-    """Read only small metadata records from a bounded tail; never retain message bodies."""
+    """Stream bounded tail lines; never materialize the tail or retain message bodies."""
 
     markers = (
         b'"type":"task_started"',
@@ -69,14 +69,34 @@ def _tail_records(path: Path) -> Iterable[dict[str, Any]]:
         with path.open("rb") as stream:
             start = max(0, size - _TAIL_BYTES)
             stream.seek(start)
-            data = stream.read(_TAIL_BYTES)
+            remaining = size - start
             if start:
-                newline = data.find(b"\n")
-                data = data[newline + 1 :] if newline >= 0 else b""
-            if data and not data.endswith((b"\n", b"\r")):
-                newline = data.rfind(b"\n")
-                data = data[: newline + 1] if newline >= 0 else b""
-            for raw in data.splitlines():
+                # The seek may land inside a record. Discard that line in
+                # bounded pieces before looking for complete metadata.
+                while remaining:
+                    discarded = stream.readline(min(_MAX_RECORD_BYTES + 1, remaining))
+                    if not discarded:
+                        return
+                    remaining -= len(discarded)
+                    if discarded.endswith(b"\n"):
+                        break
+            while remaining:
+                raw = stream.readline(min(_MAX_RECORD_BYTES + 1, remaining))
+                if not raw:
+                    break
+                remaining -= len(raw)
+                if not raw.endswith(b"\n"):
+                    # Oversized or in-progress records are not metadata. Skip
+                    # their remainder without concatenating any bytes.
+                    while remaining:
+                        discarded = stream.readline(min(_MAX_RECORD_BYTES + 1, remaining))
+                        if not discarded:
+                            break
+                        remaining -= len(discarded)
+                        if discarded.endswith(b"\n"):
+                            break
+                    continue
+                raw = raw[:-1]
                 if len(raw) > _MAX_RECORD_BYTES or not any(
                     marker in raw for marker in markers
                 ):

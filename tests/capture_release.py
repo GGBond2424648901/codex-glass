@@ -1,6 +1,7 @@
 """Actual native controls on anonymous fixtures; captures never read the desktop."""
 
 import json, sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from PyQt5.QtCore import Qt, QPoint
 from PyQt5.QtGui import QPainter
@@ -43,6 +44,21 @@ def capture(out):
     QTest.qWait(50)
     save_with_popup(w, w.pages["history"].popup, out / "history-filter-open.png")
     w.pages["history"].popup.hide()
+    history = w.pages["history"]
+    history.change_mode("rate")
+    end = datetime(2026, 9, 24, 12, 0)
+    labels = [(end - timedelta(seconds=299 - offset)).isoformat() for offset in range(300)]
+    peaks = [(25, 62), (58, 136), (96, 91), (142, 221), (187, 158), (222, 270), (269, 111)]
+    values = [max(0, *(height - abs(offset - center) * 24 for center, height in peaks)) for offset in range(300)]
+    history.apply_rate_history({
+        "labels": labels,
+        "values": values,
+        "sessions": [{"file_id": 1, "model": "gpt-6-astra"}, {"file_id": 2, "model": "gpt-6-sol"}],
+        "selected_file_id": 1,
+    })
+    w.nav_buttons["history"].setFocus()
+    QTest.qWait(50)
+    w.grab().save(str(out / "history-per-second-rate.png"))
     w.change_page("overview")
     chart = w.pages["overview"].chart
     chart.zoom_at(0.55, 1)
@@ -86,7 +102,7 @@ def capture(out):
     widget.tray.hide()
     host.deleteLater()
     app.processEvents()
-    print("Captured 15 pages and native interactions, widget and miniature.")
+    print("Captured 16 pages and native interactions, widget and miniature.")
 
 
 if __name__ == "__main__":

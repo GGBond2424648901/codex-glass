@@ -361,6 +361,9 @@ class HistoryPage(Page):
         self.selected = None
         self.events = []
         self.mode = "events"
+        self.rate_seconds = 300
+        self.rate_file_id = None
+        self.rate_sessions = []
         self.sort = "timestamp"
         self.descending = True
         p = self.panel((290, 122, 1217, 92))
@@ -373,7 +376,7 @@ class HistoryPage(Page):
         self.import_button = at(GlassButton("导入 SQLite", p, kind="import", primary=True), (1019, 18, 181, 55))
         self.import_button.clicked.connect(c.import_history)
         self.tabs = at(
-            Segmented([("事件", "events"), ("本周", "week"), ("导入来源", "sources")], self), (302, 231, 401, 53)
+            Segmented([("事件", "events"), ("本周", "week"), ("每秒速率", "rate"), ("导入来源", "sources")], self), (302, 231, 594, 53)
         )
         self.tabs.changed.connect(self.change_mode)
         p = self.panel((290, 296, 1217, 549))
@@ -395,6 +398,18 @@ class HistoryPage(Page):
         self.next_button.clicked.connect(lambda: self.navigate(1))
         self.prev_button.setEnabled(False)
         self.next_button.setEnabled(False)
+        self.rate_title = text(p, "输出速率 · 近5分钟", (27, 17, 760, 46), 27, bold=True)
+        self.rate_session = at(GlassButton("暂无会话", p), (808, 20, 187, 44))
+        self.rate_session.clicked.connect(self.choose_rate_session)
+        self.rate_range = at(GlassButton("近5分钟", p), (1007, 20, 174, 44))
+        self.rate_range.clicked.connect(self.choose_rate_range)
+        self.rate_chart = at(GlassChart(p), (25, 76, 1165, 406))
+        self.rate_chart.axis_font_size = 17
+        self.rate_chart.y_axis = True
+        self.rate_chart.empty_text = "此时段没有已完成调用"
+        self.rate_note = text(p, "单个本机会话文件（子代理单列）· 按调用完成时间归档；非逐 Token 流速。滚轮缩放，双击复位。", (28, 492, 1150, 37), 18, MUTED)
+        for item in (self.rate_title, self.rate_session, self.rate_range, self.rate_chart, self.rate_note):
+            item.hide()
         p = self.panel((290, 859, 1217, 96))
         self.source_label = text(p, "本机历史", (33, 25, 460, 44), 21, bold=True)
         self.import_label = text(p, "", (512, 25, 440, 44), 20)
@@ -408,10 +423,54 @@ class HistoryPage(Page):
         self.mode = key
         self.tabs.set_value(key)
         self.offset = 0
-        self.search.setEnabled(key != "sources")
-        self.filter.setEnabled(key != "sources")
-        self.export.setEnabled(key != "sources")
+        events_mode = key in ("events", "week")
+        self.search.setEnabled(events_mode)
+        self.filter.setEnabled(events_mode)
+        self.export.setEnabled(events_mode)
+        for item in (self.table, self.page_label, self.prev_button, self.next_button):
+            item.setVisible(key != "rate")
+        for item in (self.rate_title, self.rate_session, self.rate_range, self.rate_chart, self.rate_note):
+            item.setVisible(key == "rate")
         self.controller.fetch_history()
+
+    def choose_rate_session(self):
+        options = {
+            f'会话 {index} · {row.get("model") or "未知模型"}': int(row["file_id"])
+            for index, row in enumerate(self.rate_sessions, 1)
+        }
+        if not options:
+            return
+        selected = next((label for label, identifier in options.items() if identifier == self.rate_file_id), "")
+        self.choice(self.rate_session, list(options), selected, lambda value: self.select_rate_session(options[value]))
+
+    def select_rate_session(self, file_id):
+        if file_id == self.rate_file_id:
+            return
+        self.rate_file_id = int(file_id)
+        index = next((i for i, row in enumerate(self.rate_sessions, 1) if int(row["file_id"]) == file_id), 0)
+        self.rate_session.setText(f"会话 {index}/{len(self.rate_sessions)} ▾")
+        self.rate_chart.set_series([], [], animate=False, unit="已完成调用 Token/s")
+        self.controller.fetch_history()
+
+    def choose_rate_range(self):
+        self.choice(self.rate_range, ["近1分钟", "近5分钟", "近15分钟"], self.rate_range.text(), self.set_rate_range)
+
+    def set_rate_range(self, value):
+        self.rate_seconds = {"近1分钟": 60, "近5分钟": 300, "近15分钟": 900}[value]
+        self.rate_range.setText(value)
+        self.rate_title.setText("输出速率 · " + value)
+        self.controller.fetch_history()
+
+    def apply_rate_history(self, payload):
+        self.rate_sessions = payload.get("sessions") or []
+        self.rate_file_id = payload.get("selected_file_id")
+        index = next((i for i, row in enumerate(self.rate_sessions, 1) if row.get("file_id") == self.rate_file_id), 0)
+        self.rate_session.setText(f"会话 {index}/{len(self.rate_sessions)} ▾" if index else "暂无会话")
+        self.rate_session.setEnabled(bool(self.rate_sessions))
+        values = (payload.get("values") or [])[-900:]
+        labels = (payload.get("labels") or [])[-len(values):]
+        self.rate_chart.motion = self.controller.chart_motion
+        self.rate_chart.set_series(values, labels, animate=self.controller.chart_motion, unit="已完成调用 Token/s")
 
     def choose_models(self):
         options = list(self.controller.data.get("by_model", {}))

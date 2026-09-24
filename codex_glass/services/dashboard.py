@@ -38,6 +38,11 @@ HTML_PAGE = resource_path("assets", "web", "dashboard.html").read_text(encoding=
 
 
 class Handler(BaseHTTPRequestHandler):
+    def log_request(self, code="-", size="-"):
+        if str(code) == "200" and urlparse(self.path).path == "/api/live-activity":
+            return
+        super().log_request(code, size)
+
     def _send(self, status: int, body: bytes, content_type: str = "text/plain; charset=utf-8"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -53,6 +58,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/healthz":
             self._send(200, b"ok\n", "text/plain; charset=utf-8")
+            return
+
+        if parsed.path == "/api/live-activity":
+            from codex_glass.core.invocations import live_model_activity
+
+            selected = (parse_qs(parsed.query).get("conversation_id", [""])[0] or "")[:128] or None
+            coordinator = self.server.coordinator
+            data = live_model_activity(
+                getattr(coordinator, "index", None),
+                getattr(coordinator, "sessions_dir", None),
+                selected_conversation_id=selected,
+            )
+            self._send(200, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
+
+        if parsed.path == "/api/rate-history":
+            from codex_glass.core.presentation import local_rate_history
+
+            try:
+                query = parse_qs(parsed.query)
+                seconds = int(query.get("seconds", ["300"])[0])
+                file_id = int(query["file_id"][0]) if "file_id" in query else None
+            except ValueError:
+                self._send(400, b"invalid range or session")
+                return
+            data = local_rate_history(self.server.coordinator, seconds=seconds, file_id=file_id)
+            self._send(200, json.dumps(data).encode("utf-8"), "application/json; charset=utf-8")
             return
 
         if parsed.path == "/api/widget":

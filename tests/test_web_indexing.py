@@ -1,4 +1,5 @@
 import io
+from contextlib import redirect_stderr
 import json
 import os
 import socket
@@ -191,6 +192,11 @@ class WebIndexingTests(unittest.TestCase):
         self.assertNotIn("events", data)
         self.assertIn("today", data["windows"])
         self.assertEqual([], data["rate_limits"]["limits"])
+        code, rate = self.request("/api/rate-history?seconds=7")
+        self.assertEqual(200, code)
+        self.assertEqual(7, len(rate["values"]))
+        self.assertNotIn("total", rate)
+        self.assertNotIn("model_activity", rate)
 
     def test_quota_endpoint_does_not_sample_or_evict_selected_conversation(self):
         from codex_glass.core.live_telemetry import DEFAULT_SAMPLER
@@ -228,8 +234,56 @@ class WebIndexingTests(unittest.TestCase):
         activity = data["model_activity"]
         self.assertEqual("active-a", activity["selected_conversation_id"])
         by_id = {row["conversation_id"]: row for row in activity["conversations"]}
-        self.assertEqual(1.0, by_id["active-a"]["telemetry"]["output_tps"])
+        self.assertEqual(20.0, by_id["active-a"]["telemetry"]["output_tps"])
         self.assertIsNone(by_id["active-b"]["telemetry"])
+        request_log = io.StringIO()
+        with redirect_stderr(request_log), mock.patch.object(
+            self.coordinator, "snapshot", side_effect=AssertionError("live rate rebuilt history")
+        ):
+            code, live = self.request("/api/live-activity?conversation_id=active-a")
+        self.assertEqual(200, code)
+        self.assertEqual("active-a", live["selected_conversation_id"])
+        self.assertNotIn("total", live)
+        self.assertNotIn("rate_limits", live)
+        self.assertNotIn("/api/live-activity", request_log.getvalue(), "1 Hz checks must not fill backend.log")
+
+    def test_on_demand_per_second_history_reads_only_bounded_local_index(self):
+        from codex_glass.core.presentation import local_rate_history
+
+        anchor = datetime(2026, 9, 24, 12, 0, 4)
+        with self.index.write_transaction() as connection:
+            file_id = connection.execute("SELECT file_id FROM session_files LIMIT 1").fetchone()[0]
+            for offset, second, output in ((100001, 1, 30), (100002, 3, 60), (100003, 3, 40)):
+                connection.execute(
+                    "INSERT INTO usage_events(file_id,source_offset,occurred_at,output_tokens,total_tokens,created_at) VALUES(?,?,?,?,?,?)",
+                    (file_id, offset, f"2026-09-24T12:00:{second:02d}", output, output, time.time()),
+                )
+            other_file_id = connection.execute(
+                "INSERT INTO session_files(path,created_at,updated_at) VALUES(?,?,?)",
+                (str(self.sessions / "other-conversation.jsonl"), time.time(), time.time()),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO usage_events(file_id,source_offset,occurred_at,output_tokens,total_tokens,created_at) VALUES(?,?,?,?,?,?)",
+                (other_file_id, 1, "2026-09-24T12:00:03", 200, 200, time.time()),
+            )
+        with mock.patch.object(self.coordinator, "snapshot", side_effect=AssertionError("history summary rebuilt")):
+            result = local_rate_history(self.coordinator, seconds=5, file_id=file_id, now=anchor)
+        self.assertEqual([0, 30, 0, 100, 0], result["values"])
+        self.assertEqual(5, len(result["labels"]))
+        self.assertEqual("local_completed_calls", result["source"])
+        self.assertEqual(file_id, result["selected_file_id"])
+        self.assertEqual(2, len(result["sessions"]))
+
+    def test_rate_history_endpoint_passes_selected_session_file(self):
+        self.serve()
+
+        def selected(_coordinator, *, seconds, file_id=None):
+            return {"seconds": seconds, "file_id": file_id, "values": [], "labels": []}
+
+        with mock.patch("codex_glass.core.presentation.local_rate_history", side_effect=selected):
+            code, payload = self.request("/api/rate-history?seconds=9&file_id=7")
+        self.assertEqual(200, code)
+        self.assertEqual(7, payload["file_id"])
 
     def test_refresh_returns_202_and_schedules_next_scan_without_waiting(self):
         entered, release, second = threading.Event(), threading.Event(), threading.Event()

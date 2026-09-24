@@ -94,6 +94,56 @@ class NativeDashboardTests(unittest.TestCase):
         self.assertFalse(p.prev_button.isEnabled())
         self.assertIn("21", p.page_label.text())
 
+    def test_history_rate_tab_shows_bounded_per_second_curve_only_when_selected(self):
+        p = self.w.pages["history"]
+        self.w.change_page("history")
+        p.change_mode("rate")
+        p.apply_rate_history({
+            "labels": [f"2026-09-24T12:00:{second:02d}" for second in range(5)],
+            "values": [0, 30, 0, 100, 0],
+            "seconds": 5,
+            "sessions": [{"file_id": 5, "model": "gpt-6-sol"}, {"file_id": 7, "model": "gpt-6-luna"}],
+            "selected_file_id": 5,
+        })
+        self.assertFalse(p.table.isVisible())
+        self.assertTrue(p.rate_chart.isVisible())
+        self.assertEqual([0, 30, 0, 100, 0], p.rate_chart.target_values)
+        self.assertIn("1/2", p.rate_session.text())
+        p.select_rate_session(7)
+        self.assertEqual(7, p.rate_file_id)
+        self.assertIn("调用完成", p.rate_note.text())
+        p.change_mode("events")
+        self.assertTrue(p.table.isVisible())
+        self.assertFalse(p.rate_chart.isVisible())
+
+    def test_history_rate_tab_fetches_only_on_demand_rate_endpoint(self):
+        from unittest.mock import patch
+
+        p = self.w.pages["history"]
+        self.w.change_page("history")
+        self.w.auto_fetch = True
+        paths = []
+        payload = {"labels": ["2026-09-24T12:00:00"], "values": [80], "seconds": 300}
+
+        def get_json(path):
+            paths.append(path)
+            return payload
+
+        with patch.object(self.w, "get_json", side_effect=get_json), patch.object(
+            self.w, "run_job", side_effect=lambda _key, operation: operation()
+        ):
+            p.change_mode("rate")
+        self.assertEqual(["/api/rate-history?seconds=300"], paths)
+        self.w.job_finished("history", (self.w.history_generation, payload), None)
+        self.assertEqual([80.0], p.rate_chart.target_values)
+        p.rate_file_id = 7
+        paths.clear()
+        with patch.object(self.w, "get_json", side_effect=get_json), patch.object(
+            self.w, "run_job", side_effect=lambda _key, operation: operation()
+        ):
+            self.w.fetch_history()
+        self.assertEqual(["/api/rate-history?seconds=300&file_id=7"], paths)
+
     def test_corners_are_transparent_and_no_design_image_is_rendered(self):
         w = self.w
         w.set_motion(False)
